@@ -764,9 +764,8 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
                               (128 * 1024) / ngx_pagesize, ngx_pagesize);
 
-#if (NGX_SUPPRESS_WARN)
     buf = NULL;
-#endif
+    fd = -1;
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
@@ -838,7 +837,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
 close:
 
-    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+    if (fd != NGX_INVALID_FILE && ngx_close_file(fd) == NGX_FILE_ERROR) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                            ngx_close_file_n "\"%s\" failed",
                            zmcf->dict_file->data);
