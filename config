@@ -1,0 +1,73 @@
+if [ "$ngx_module_link" != ADDON ]; then
+    cat << END
+    $0: error: ngx_http_zstd_filter_module can only be linked as an addon.
+END
+fi
+
+ngx_feature_incs="#include <zstd.h>"
+ngx_feature_test="(void) ZSTD_createCCtx();"
+ngx_feature_libs="-lzstd"
+ngx_feature_run=yes
+
+ngx_zstd_opt_I=
+ngx_zstd_opt_L=
+
+if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
+    ngx_feature="ZStandard library in $ZSTD_INC and $ZSTD_LIB"
+    ngx_feature_path=$ZSTD_INC
+
+    ngx_zstd_opt_I="-I$ZSTD_INC"
+    ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath=$ZSTD_LIB"
+    SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
+    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
+
+    . auto/feature
+
+    # restore
+    CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ]; then
+        cat << END
+        $0: error: ngx_http_zstd_filter_module requires the ZStandard library, please be sure that "\$ZSTD_INC" and "\$ZSTD_LIB" are set correctly.
+END
+        exit 1
+    fi
+else
+    # auto-discovery
+    ngx_feature="ZStandard library"
+    . auto/feature
+
+    if [ $ngx_found = no ]; then
+        cat << END
+        $0: error: ngx_http_zstd_filter_module requires the ZStandard library.
+END
+        exit 1
+    fi
+
+    # TODO we need more tries for the different OS port.
+fi
+
+HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
+
+ngx_module_type=HTTP_FILTER
+ngx_module_name=ngx_http_zstd_filter_module
+ngx_module_incs="$ngx_zstd_opt_I"
+ngx_module_srcs=$HTTP_ZSTD_SRCS
+
+. auto/module
+
+if [ "$HTTP_GZIP" = YES ]; then
+    next=ngx_http_gzip_filter_module
+else
+    next=ngx_http_range_header_filter_module
+fi
+
+HTTP_FILTER_MODULES=`echo $HTTP_FILTER_MODULES \
+                     | sed "s/$ngx_module_name//" \
+                     | sed "s/$next/$next $ngx_module_name/"`
+
+CFLAGS="$ngx_zstd_opt_I $CFLAGS"
+NGX_LD_OPT="$ngx_zstd_opt_L $NGX_LD_OPT"
