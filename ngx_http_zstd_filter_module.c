@@ -196,7 +196,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
        || (r->headers_out.content_encoding
            && r->headers_out.content_encoding->value.len)
        || (r->headers_out.content_length_n != -1
-           && r->headers_out.content_length_n > zlcf->min_length)
+           && r->headers_out.content_length_n < zlcf->min_length)
        || ngx_http_test_content_type(r, &zlcf->types) == NULL
        || r->header_only)
     {
@@ -222,6 +222,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ngx_http_set_ctx(r, ctx, ngx_http_zstd_filter_module);
 
     ctx->request = r;
+    ctx->last_out = &ctx->out;
 
     h = ngx_list_push(&r->headers_out.headers);
     if (h == NULL) {
@@ -401,15 +402,18 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     case NGX_HTTP_ZSTD_FILTER_FLUSH:
         hint = "ZSTD_flushStream() ";
         rc = ZSTD_flushStream(ctx->cstream, &ctx->buffer_out);
+        break;
 
     case NGX_HTTP_ZSTD_FILTER_END:
         hint = "ZSTD_endStream() ";
         rc = ZSTD_endStream(ctx->cstream, &ctx->buffer_out);
+        break;
 
     default:
         hint = "ZSTD_compressStream() ";
         rc = ZSTD_compressStream(ctx->cstream, &ctx->buffer_out,
                                  &ctx->buffer_in);
+        break;
     }
 
     if (ZSTD_isError(rc)) {
@@ -448,6 +452,10 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
     }
 
+    if (ngx_buf_size(ctx->out_buf) == 0) {
+        return NGX_AGAIN;
+    }
+
     cl = ngx_alloc_chain_link(r->pool);
     if (cl == NULL) {
         return NGX_ERROR;
@@ -470,6 +478,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     *ctx->last_out = cl;
     ctx->last_out = &cl->next;
+
+    ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
 
     return ctx->last && rc == 0 ? NGX_OK : NGX_AGAIN;
 }
@@ -552,7 +562,7 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     ctx->buffer_out.dst = ctx->out_buf->pos;
     ctx->buffer_out.pos = 0;
-    ctx->buffer_out.size = ngx_buf_size(ctx->out_buf);
+    ctx->buffer_out.size = ctx->out_buf->end - ctx->out_buf->start;
 
     return NGX_OK;
 }
@@ -749,6 +759,10 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_file_info_t             info;
     ngx_http_zstd_main_conf_t  *zmcf;
 
+    rc = NGX_OK;
+    buf = NULL;
+    fd = NGX_INVALID_FILE;
+
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
     ngx_conf_merge_value(conf->level, prev->level, 1);
     ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
@@ -763,10 +777,6 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_ptr_value(conf->dict, prev->dict, NULL);
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
                               (128 * 1024) / ngx_pagesize, ngx_pagesize);
-
-    rc = NGX_OK;
-    buf = NULL;
-    fd = -1;
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
