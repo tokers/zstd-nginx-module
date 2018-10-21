@@ -17,7 +17,7 @@
 
 
 typedef struct {
-    ngx_str_t                   *dict_file;
+    ngx_str_t                    dict_file;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -141,7 +141,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
     { ngx_string("zstd_dict_file"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_str_slot,
-      NGX_HTTP_LOC_CONF_OFFSET,
+      NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_zstd_main_conf_t, dict_file),
       NULL },
 
@@ -701,18 +701,13 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
 {
     ngx_http_zstd_main_conf_t *zmcf = conf;
 
-    ngx_str_t  *dict;
-
-    dict = zmcf->dict_file;
-    if (dict == NULL || dict->len == 0) {
+    if (zmcf->dict_file.len == 0) {
         return NGX_CONF_OK;
     }
 
-    if (ngx_conf_full_name(cf->cycle, dict, 1) != NGX_OK) {
+    if (ngx_conf_full_name(cf->cycle, &zmcf->dict_file, 1) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
-
-    zmcf->dict_file = dict;
 
     return NGX_CONF_OK;
 }
@@ -780,7 +775,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
-    if (conf->enable && zmcf->dict_file) {
+    if (conf->enable && zmcf->dict_file.len > 0) {
 
         if (conf->level == prev->level) {
             conf->dict = prev->dict;
@@ -791,7 +786,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
              * so we should create a seperate dict object.
              */
 
-            fd = ngx_open_file(zmcf->dict_file->data, NGX_FILE_RDONLY,
+            fd = ngx_open_file(zmcf->dict_file.data, NGX_FILE_RDONLY,
                                NGX_FILE_OPEN, 0);
 
             if (fd == NGX_INVALID_FILE) {
@@ -851,7 +846,7 @@ close:
     if (fd != NGX_INVALID_FILE && ngx_close_file(fd) == NGX_FILE_ERROR) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                            ngx_close_file_n "\"%s\" failed",
-                           zmcf->dict_file->data);
+                           zmcf->dict_file.data);
 
         rc = NGX_CONF_ERROR;
     }
