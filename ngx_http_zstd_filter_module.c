@@ -390,9 +390,9 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd compress in: src:%p pos:%ud size: %ud, "
-                   "dst: %p pos:%ud size:%ud flush:%d redo:%d",
+                   "dst:%p pos:%ud size:%ud flush:%d redo:%d",
                    ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
-                   ctx->buffer_out.src, ctx->buffer_out.pos,
+                   ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size, ctx->flush, ctx->redo);
 
     pos = ctx->buffer_out.pos;
@@ -427,7 +427,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    "zstd compress out: src:%p pos:%ud size: %ud, "
                    "dst:%p pos:%ud size:%ud",
                    ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
-                   ctx->buffer_out.src, ctx->buffer_out.pos,
+                   ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size);
 
     ctx->out_buf->last += ctx->buffer_out.pos - pos;
@@ -791,16 +791,16 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
             if (fd == NGX_INVALID_FILE) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_open_file_n "\"%V\" failed",
-                                   zmcf->dict_file);
+                                   ngx_open_file_n " \"%V\" failed",
+                                   &zmcf->dict_file);
 
                 return NGX_CONF_ERROR;
             }
 
             if (ngx_fd_info(fd, &info) == NGX_FILE_ERROR) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_fd_info_n "\"%V\" failed",
-                                   zmcf->dict_file);
+                                   ngx_fd_info_n " \"%V\" failed",
+                                   &zmcf->dict_file);
 
                 rc = NGX_CONF_ERROR;
                 goto close;
@@ -816,8 +816,8 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             n = ngx_read_fd(fd, (void *) buf, size);
             if (n < 0) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_read_fd_n "%V\" failed",
-                                   zmcf->dict_file);
+                                   ngx_read_fd_n " %V\" failed",
+                                   &zmcf->dict_file);
 
                 rc = NGX_CONF_ERROR;
                 goto close;
@@ -825,7 +825,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             } else if ((size_t) n != size) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                                    ngx_read_fd_n "\"%V incomplete\"",
-                                   zmcf->dict_file);
+                                   &zmcf->dict_file);
 
                 rc = NGX_CONF_ERROR;
                 goto close;
@@ -845,8 +845,8 @@ close:
 
     if (fd != NGX_INVALID_FILE && ngx_close_file(fd) == NGX_FILE_ERROR) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                           ngx_close_file_n "\"%s\" failed",
-                           zmcf->dict_file.data);
+                           ngx_close_file_n " \"%V\" failed",
+                           &zmcf->dict_file);
 
         rc = NGX_CONF_ERROR;
     }
