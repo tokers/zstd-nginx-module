@@ -46,9 +46,9 @@ server {
 
 To use this module, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. several points should be taken care.
 
-* You can environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library represently.
-* static library is tried prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
-* System zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
+* You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library represently.
+* static library will be tried prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
+* System's zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
 
 # Directives
 
