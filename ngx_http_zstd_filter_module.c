@@ -43,6 +43,7 @@ typedef struct {
     ngx_chain_t                 *out;
     ngx_chain_t                **last_out;
 
+    ngx_buf_t                   *in_buf;
     ngx_buf_t                   *out_buf;
     ngx_int_t                    bufs;
 
@@ -383,7 +384,7 @@ failed:
 static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    size_t        rc, pos;
+    size_t        rc, pos_in, pos_out;
     char         *hint;
     ngx_chain_t  *cl;
     ngx_buf_t    *b;
@@ -395,7 +396,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size, ctx->flush, ctx->redo);
 
-    pos = ctx->buffer_out.pos;
+    pos_in = ctx->buffer_in.pos;
+    pos_out = ctx->buffer_out.pos;
 
     switch (ctx->action) {
 
@@ -430,7 +432,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size);
 
-    ctx->out_buf->last += ctx->buffer_out.pos - pos;
+    ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
+    ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     ctx->redo = 0;
 
     if (rc > 0) {
@@ -488,8 +491,6 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 static ngx_int_t
 ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    ngx_buf_t  *buf;
-
     if (ctx->buffer_in.pos < ctx->buffer_in.size
         || ctx->flush
         || ctx->last
@@ -505,19 +506,19 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_DECLINED;
     }
 
-    buf = ctx->in->buf;
+    ctx->in_buf = ctx->in->buf;
     ctx->in = ctx->in->next;
 
-    if (buf->flush) {
+    if (ctx->in_buf->flush) {
         ctx->flush = 1;
 
-    } else if (buf->last_buf) {
+    } else if (ctx->in_buf->last_buf) {
         ctx->last = 1;
     }
 
-    ctx->buffer_in.src = buf->pos;
+    ctx->buffer_in.src = ctx->in_buf->pos;
     ctx->buffer_in.pos = 0;
-    ctx->buffer_in.size = ngx_buf_size(buf);
+    ctx->buffer_in.size = ngx_buf_size(ctx->in_buf);
 
     if (ctx->buffer_in.size == 0) {
         return NGX_AGAIN;
