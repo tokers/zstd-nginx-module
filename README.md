@@ -14,6 +14,8 @@ zstd-nginx-module - Nginx module for the [Zstandard compression](https://faceboo
   * [zstd_min_length](#zstd_min_length)
   * [zstd_types](#zstd_types)
   * [zstd_buffers](#zstd_buffers)
+* [Variables](#variables)
+  * [$zstd_ratio](#$zstd_ratio)
 * [Author](#author)
 
 # Status
@@ -44,7 +46,7 @@ server {
 
 # Installation
 
-To use this module, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. several points should be taken care.
+To use this module, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. Several points should be taken care.
 
 * You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library represently.
 * static library will be tried prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
@@ -99,6 +101,12 @@ Enables ztd of responses for the specified MIME types in addition to "text/html"
 **Context:** *http, server, location*
 
 Sets the number and size of buffers used to compress a response. By default, the buffer size is equal to one memory page. This is either 4K or 8K, depending on a platform.
+
+# Variables
+
+## $zstd_ratio
+
+Achieved compression ratio, computed as the ratio between the original and compressed response sizes.
 
 # Author
 
