@@ -54,6 +54,9 @@ typedef struct {
 
     ngx_http_request_t          *request;
 
+    size_t                       bytes_in;
+    size_t                       bytes_out;
+
     unsigned                     action:2;
     unsigned                     last:1;
     unsigned                     redo:1;
@@ -70,6 +73,8 @@ typedef struct {
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
+
+static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
 
 
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
@@ -91,6 +96,9 @@ static char *ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_zstd_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
+static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
+static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *vv, uintptr_t data);
 static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
@@ -151,7 +159,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
 
 static ngx_http_module_t  ngx_http_zstd_filter_module_ctx = {
-    NULL,                                   /* preconfiguration */
+    ngx_http_zstd_add_variables,            /* preconfiguration */
     ngx_http_zstd_filter_init,              /* postconfiguration */
 
     ngx_http_zstd_create_main_conf,         /* create main configuration */
@@ -476,6 +484,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->flush = 0;
     }
 
+    ctx->bytes_out += ngx_buf_size(b);
+
     cl->next = NULL;
     cl->buf = b;
 
@@ -519,6 +529,8 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->buffer_in.src = ctx->in_buf->pos;
     ctx->buffer_in.pos = 0;
     ctx->buffer_in.size = ngx_buf_size(ctx->in_buf);
+
+    ctx->bytes_in += ngx_buf_size(ctx->in_buf);
 
     if (ctx->buffer_in.size == 0) {
         return NGX_AGAIN;
@@ -882,6 +894,54 @@ ngx_http_zstd_filter_alloc(void *opaque, size_t size)
                    "zstd alloc: %p, size: %uz", p, size);
 
     return p;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_add_variables(ngx_conf_t *cf)
+{
+    ngx_http_variable_t  *v;
+
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_ratio,
+                              NGX_HTTP_VAR_NOCACHEABLE);
+    if (v == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->get_handler = ngx_http_zstd_ratio_variable;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *vv, uintptr_t data)
+{
+    ngx_uint_t            ratio_int, ratio_frac;
+    ngx_http_zstd_ctx_t  *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
+    if (ctx == NULL || !ctx->done || ctx->bytes_out == 0) {
+        vv->not_found = 1;
+        return NGX_OK;
+    }
+
+    vv->data = ngx_pnalloc(r->pool, NGX_INT32_LEN + 3);
+    if (vv->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ratio_int = (ngx_uint_t) ctx->bytes_in / ctx->bytes_out;
+    ratio_frac = (ngx_uint_t) (ctx->bytes_in * 1000 / ctx->bytes_out % 1000);
+
+    vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
+              - vv->data;
+
+    vv->valid = 1;
+    vv->no_cacheable = 1;
+
+    return NGX_OK;
 }
 
 
