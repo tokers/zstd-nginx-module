@@ -127,9 +127,9 @@ The `ngx_http_zstd_static_module` module allows sending precompressed files with
 
 ### zstd_static
 
-**Syntax:**	*zstd_static on | off | always;*
-**Default:** *gzip_static off;*
-**Context:** *http, server, location*
+**Syntax:**	*zstd_static on | off | always;*  
+**Default:** *gzip_static off;*  
+**Context:** *http, server, location*  
 
 Enables ("on") or disables ("off") checking the existence of precompressed files. The following directives are also taken into account: gzip_vary.
 
