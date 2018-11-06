@@ -13,12 +13,12 @@ __DATA__
 
 === TEST 1: zstd_static off
 --- config
-    location /test.html {
+    location /test {
         zstd_static off;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- response_headers
 Content-Length: 59738
 ETag: "5be17d33-e95a"
@@ -30,12 +30,12 @@ ETag: "5be17d33-e95a"
 
 === TEST 2: zstd_static off (with accept-encoding header)
 --- config
-    location /test.html {
+    location /test {
         zstd_static off;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 Accept-Encoding: gzip,zstd
 --- response_headers
 Content-Length: 59738
@@ -48,12 +48,12 @@ ETag: "5be17d33-e95a"
 
 === TEST 3: zstd_static on
 --- config
-    location /test.html {
+    location /test {
         zstd_static on;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- more_headers
 Accept-Encoding: gzip, zstd
 --- response_headers
@@ -68,12 +68,12 @@ Content-Encoding: zstd
 
 === TEST 4: zstd_static on (without accept-encoding header)
 --- config
-    location /test.html {
+    location /test {
         zstd_static on;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- response_headers
 Content-Length: 59738
 ETag: "5be17d33-e95a"
@@ -86,12 +86,12 @@ Content-Encoding: zstd
 
 === TEST 5: zstd_static on (without zstd component in accept-encoding header)
 --- config
-    location /test.html {
+    location /test {
         zstd_static on;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- more_headers
 Accept-Encoding: gzip, br
 --- response_headers
@@ -105,12 +105,12 @@ ETag: "5be17d33-e95a"
 
 === TEST 6: zstd_static always
 --- config
-    location /test.html {
+    location /test {
         zstd_static always;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- more_headers
 Accept-Encoding: gzip, br
 --- response_headers
@@ -124,12 +124,12 @@ Content-Encoding: zstd
 
 === TEST 6: zstd_static always (without accept-encoding header)
 --- config
-    location /test.html {
+    location /test {
         zstd_static always;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- response_headers
 Content-Length: 20706
 ETag: "5be17d33-50e2"
@@ -141,12 +141,12 @@ Content-Encoding: zstd
 
 === TEST 7: zstd_static always (without zstd component in accept-encoding header)
 --- config
-    location /test.html {
+    location /test {
         zstd_static always;
         root ../../t/suite;
     }
 --- request
-GET /test.html
+GET /test
 --- more_headers
 Accept-Encoding: gzip, br
 --- response_headers
@@ -159,12 +159,12 @@ Content-Encoding: zstd
 
 === TEST 8: zstd_static always (file does not exist)
 --- config
-    location /test2.html {
+    location /test2 {
         zstd_static always;
         root ../../t/suite;
     }
 --- request
-GET /test2.html
+GET /test2
 --- more_headers
 Accept-Encoding: gzip, br
 --- error_code: 404
@@ -173,12 +173,12 @@ Accept-Encoding: gzip, br
 
 === TEST 9: zstd_static on (file does not exist)
 --- config
-    location /test2.html {
+    location /test2 {
         zstd_static on;
         root ../../t/suite;
     }
 --- request
-GET /test2.html
+GET /test2
 --- more_headers
 Accept-Encoding: gzip, br
 --- error_code: 404
@@ -187,12 +187,12 @@ Accept-Encoding: gzip, br
 
 === TEST 10: zstd_static off (file does not exist)
 --- config
-    location /test2.html {
+    location /test2 {
         zstd_static off;
         root ../../t/suite;
     }
 --- request
-GET /test2.html
+GET /test2
 --- more_headers
 Accept-Encoding: gzip, br
 --- error_code: 404
