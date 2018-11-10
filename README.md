@@ -81,6 +81,8 @@ The `ngx_http_zstd_filter_module` module is a filter that compresses responses u
 
 Specifies the external dictionary.
 
+**WARNING:** Be careful! The content-coding registration only specifies a means to signal the use of the zstd format, and does not additionally specify any mechanism for advertising/negotiating/synchronizing the use of a specific dictionary between client and server. Use the `zstd_dict_file` only if you can insure that both ends (server and client) are capable of  using the same dictionary (e.g. advertise with a HTTP header). See https://github.com/tokers/zstd-nginx-module/issues/2 for the details.
+
 ### zstd
 
 **Syntax:** *zstd on | off;*  
