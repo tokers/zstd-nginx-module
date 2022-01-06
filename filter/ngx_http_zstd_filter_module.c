@@ -102,6 +102,7 @@ static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
 static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
+static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
@@ -121,7 +122,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd_comp_level"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_num_slot,
+      ngx_conf_zstd_set_num_slot_with_negatives,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, level),
       &ngx_http_zstd_comp_level_bounds },
@@ -964,12 +965,57 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 {
     ngx_int_t  *np = data;
 
-    if (*np < 1 || *np > ZSTD_maxCLevel()) {
+    if (*np == 0 || *np < (ngx_int_t)ZSTD_minCLevel() || *np > ZSTD_maxCLevel()) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "zstd compress level must between 1 and %i",
-                           ZSTD_maxCLevel());
+                           "zstd compress level must between %i and %i excluding 0",
+                           (ngx_int_t)ZSTD_minCLevel(), ZSTD_maxCLevel());
 
         return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    char  *p = conf;
+
+    ngx_int_t        *np;
+    ngx_str_t        *value;
+    ngx_conf_post_t  *post;
+
+
+    np = (ngx_int_t *) (p + cmd->offset);
+
+    if (*np != NGX_CONF_UNSET) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (*(value[1].data) == '-') {
+        // Parse ignoring the leading '-' character
+        *np = ngx_atoi(value[1].data + 1, value[1].len - 1);
+
+        // NGX_ERROR is -1 so we need to check for that before making the parsed
+        // result negative
+        if (*np == NGX_ERROR) {
+            return "invalid number";
+        }
+
+        *np = -*np;
+    } else {
+        *np = ngx_atoi(value[1].data, value[1].len);
+
+        if (*np == NGX_ERROR) {
+            return "invalid number";
+        }
+    }
+
+    if (cmd->post) {
+        post = cmd->post;
+        return post->post_handler(cf, post, np);
     }
 
     return NGX_CONF_OK;
