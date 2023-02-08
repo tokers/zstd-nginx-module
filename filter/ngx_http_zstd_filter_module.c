@@ -215,12 +215,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     r->gzip_vary = 1;
 
-    if (!r->gzip_tested) {
-        if (ngx_http_zstd_ok(r) != NGX_OK) {
-            return ngx_http_next_header_filter(r);
-        }
-
-    } else if (!r->gzip_ok) {
+    if (ngx_http_zstd_ok(r) != NGX_OK) {
         return ngx_http_next_header_filter(r);
     }
 
