@@ -641,7 +641,7 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
 {
     u_char  *p;
 
-    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 1);
+    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 2);
     if (p == NULL) {
         return NGX_DECLINED;
     }
