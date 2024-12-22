@@ -10,6 +10,8 @@
 
 #include <zstd.h>
 
+#include "../common/ngx_http_zstd_common.h"
+
 
 #define NGX_HTTP_ZSTD_FILTER_COMPRESS       0
 #define NGX_HTTP_ZSTD_FILTER_FLUSH          1
@@ -88,8 +90,6 @@ static ZSTD_CStream *ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
-static ngx_int_t ngx_http_zstd_accept_encoding(ngx_str_t *ae);
-static ngx_int_t ngx_http_zstd_ok(ngx_http_request_t *r);
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
 static void * ngx_http_zstd_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf);
@@ -194,28 +194,49 @@ static ngx_int_t
 ngx_http_zstd_header_filter(ngx_http_request_t *r)
 {
     ngx_table_elt_t           *h;
-    ngx_http_zstd_loc_conf_t  *zlcf;
+    ngx_http_zstd_loc_conf_t  *conf;
     ngx_http_zstd_ctx_t       *ctx;
 
-    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
+    conf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
-    if (!zlcf->enable
-        || (r->headers_out.status != NGX_HTTP_OK
-            && r->headers_out.status != NGX_HTTP_FORBIDDEN
-            && r->headers_out.status != NGX_HTTP_NOT_FOUND)
-       || (r->headers_out.content_encoding
-           && r->headers_out.content_encoding->value.len)
-       || (r->headers_out.content_length_n != -1
-           && r->headers_out.content_length_n < zlcf->min_length)
-       || ngx_http_test_content_type(r, &zlcf->types) == NULL
-       || r->header_only)
-    {
+    /* Filter only if enabled. */
+    if (!conf->enable) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* Only compress OK / forbidden / not found responses. */
+    if (r->headers_out.status != NGX_HTTP_OK &&
+        r->headers_out.status != NGX_HTTP_FORBIDDEN &&
+        r->headers_out.status != NGX_HTTP_NOT_FOUND) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* Bypass "header only" responses. */
+    if (r->header_only) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* Bypass already compressed responses. */
+    if (r->headers_out.content_encoding &&
+        r->headers_out.content_encoding->value.len) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* If response size is known, do not compress tiny responses. */
+    if (r->headers_out.content_length_n != -1 &&
+        r->headers_out.content_length_n < conf->min_length) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* Compress only certain MIME-typed responses. */
+    if (ngx_http_test_content_type(r, &conf->types) == NULL) {
         return ngx_http_next_header_filter(r);
     }
 
     r->gzip_vary = 1;
 
-    if (ngx_http_zstd_ok(r) != NGX_OK) {
+    /* Check if client support zstd encoding. */
+    if (ngx_http_zstd_check_request(r) != NGX_OK) {
         return ngx_http_next_header_filter(r);
     }
 
@@ -229,12 +250,17 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ctx->request = r;
     ctx->last_out = &ctx->out;
 
+    /* Prepare response headers, so that following filters in the chain will
+     notice that response body is compressed. */
     h = ngx_list_push(&r->headers_out.headers);
     if (h == NULL) {
         return NGX_ERROR;
     }
 
     h->hash = 1;
+#if nginx_version >= 1023000
+    h->next = NULL;
+#endif
     ngx_str_set(&h->key, "Content-Encoding");
     ngx_str_set(&h->value, "zstd");
     r->headers_out.content_encoding = h;
@@ -247,7 +273,6 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     return ngx_http_next_header_filter(r);
 }
-
 
 static ngx_int_t
 ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
@@ -654,61 +679,6 @@ failed:
 }
 
 
-static ngx_int_t
-ngx_http_zstd_accept_encoding(ngx_str_t *ae)
-{
-    u_char  *p;
-
-    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 2);
-    if (p == NULL) {
-        return NGX_DECLINED;
-    }
-
-    if (p == ae->data || (*(p - 1) == ',' || *(p - 1) == ' ')) {
-
-        p += sizeof("zstd") - 1;
-
-        if (p == ae->data + ae->len || *p == ',' || *p == ' ' || *p == ';') {
-            return NGX_OK;
-        }
-    }
-
-    return NGX_DECLINED;
-}
-
-
-static ngx_int_t
-ngx_http_zstd_ok(ngx_http_request_t *r)
-{
-    ngx_table_elt_t  *ae;
-
-    if (r != r->main) {
-        return NGX_DECLINED;
-    }
-
-    ae = r->headers_in.accept_encoding;
-    if (ae == NULL) {
-        return NGX_DECLINED;
-    }
-
-    if (ae->value.len < sizeof("zstd") - 1) {
-        return NGX_DECLINED;
-    }
-
-    if (ngx_memcmp(ae->value.data, "zstd", 4) != 0
-        && ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK)
-    {
-        return NGX_DECLINED;
-    }
-
-
-    r->gzip_tested = 1;
-    r->gzip_ok = 0;
-
-    return NGX_OK;
-}
-
-
 static void *
 ngx_http_zstd_create_main_conf(ngx_conf_t *cf)
 {
@@ -909,7 +879,6 @@ ngx_http_zstd_filter_alloc(void *opaque, size_t size)
 
     return p;
 }
-
 
 static ngx_int_t
 ngx_http_zstd_add_variables(ngx_conf_t *cf)
