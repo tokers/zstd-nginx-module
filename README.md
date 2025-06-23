@@ -1,7 +1,7 @@
 # Name
 zstd-nginx-module - Nginx module for the [Zstandard compression](https://facebook.github.io/zstd/).
 
-# Table of Content
+# Table of Contents
 
 * [Name](#name)
 * [Status](#status)
@@ -60,10 +60,10 @@ server {
 
 # Installation
 
-To use theses modules, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. Several points should be taken care.
+To use theses modules, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. Several points should be taken care of.
 
-* You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library represently.
-* static library will be tried prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
+* You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library respectively.
+* static library will be attempted prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
 * System's zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
 * Both `ngx_http_zstd_static_module` and `ngx_http_zstd_filter_module` will be configured.
 
@@ -71,7 +71,7 @@ To use theses modules, configure your nginx branch with `--add-module=/path/to/z
 
 ## ngx_http_zstd_filter_module
 
-The `ngx_http_zstd_filter_module` module is a filter that compresses responses using the "zstd" method. This often helps to reduce the size of transmitted data by half or even more.
+The `ngx_http_zstd_filter_module` module is a filter that compresses responses using the _"zstd"_ method. This often helps to reduce the size of transmitted data by half or even more.
 
 ### zstd_dict_file
 
@@ -81,7 +81,7 @@ The `ngx_http_zstd_filter_module` module is a filter that compresses responses u
 
 Specifies the external dictionary.
 
-**WARNING:** Be careful! The content-coding registration only specifies a means to signal the use of the zstd format, and does not additionally specify any mechanism for advertising/negotiating/synchronizing the use of a specific dictionary between client and server. Use the `zstd_dict_file` only if you can insure that both ends (server and client) are capable of  using the same dictionary (e.g. advertise with a HTTP header). See https://github.com/tokers/zstd-nginx-module/issues/2 for the details.
+**WARNING:** Be careful! The content-coding registration only specifies a means to signal the use of the zstd format, and does not additionally specify any mechanism for advertising/negotiating/synchronizing the use of a specific dictionary between client and server. Use the `zstd_dict_file` only if you can insure that both ends _(server and client)_ are capable of using the same dictionary (e.g. advertise with a HTTP header). See https://github.com/tokers/zstd-nginx-module/issues/2 for the details.
 
 ### zstd
 
@@ -105,7 +105,7 @@ Sets a zstd compression level of a response. Acceptable values are in the range 
 **Default:** *zstd_min_length 20;*  
 **Context:** *http, server, location*
 
-Sets the minimum length of a response that will be compressed by zstd. The length is determined only from the "Content-Length" response header field.
+Sets the minimum length of a response that will be compressed by zstd. The length is determined only from the `Content-Length` response header field.
 
 ### zstd_types
 
@@ -113,7 +113,7 @@ Sets the minimum length of a response that will be compressed by zstd. The lengt
 **Default:** *zstd_types text/html;*  
 **Context:** *http, server, location*
 
-Enables ztd of responses for the specified MIME types in addition to "text/html". The special value "*" matches any MIME type.
+Enables zstd of responses for the specified MIME types in addition to `text/html`. The special value `*` matches any MIME type.
 
 ### zstd_buffers
 
@@ -121,11 +121,11 @@ Enables ztd of responses for the specified MIME types in addition to "text/html"
 **Default:** *zstd_buffers 32 4k | 16 8k;*  
 **Context:** *http, server, location*
 
-Sets the number and size of buffers used to compress a response. By default, the buffer size is equal to one memory page. This is either 4K or 8K, depending on a platform.
+Sets the number and size of buffers used to compress a response. By default the buffer size is equal to one memory page. This is either 4K or 8K, depending on a platform.
 
 ## ngx_http_zstd_static_module
 
-The `ngx_http_zstd_static_module` module allows sending precompressed files with the ".zst" filename extension instead of regular files.
+The `ngx_http_zstd_static_module` module allows sending precompressed files with the `.zst` filename extension instead of regular files.
 
 ### zstd_static
 
@@ -133,9 +133,9 @@ The `ngx_http_zstd_static_module` module allows sending precompressed files with
 **Default:** *zstd_static off;*  
 **Context:** *http, server, location*  
 
-Enables ("on") or disables ("off") checking the existence of precompressed files. The following directives are also taken into account: gzip_vary.
+Enables ("on") or disables ("off") checking the existence of precompressed files. The following directives are also taken into account: `gzip_vary`.
 
-With the "always" value, "zsted" file is used in all cases, without checking if the client supports it.
+With the _"always"_ value, "zstd" file is used in all cases, without checking if the client supports it.
 
 
 # Variables
@@ -148,7 +148,7 @@ Achieved compression ratio, computed as the ratio between the original and compr
 
 # Author
 
-Alex Zhang (张超) zchao1995@gmail, UPYUN Inc.
+Alex Zhang (张超) zchao1995@gmail.com, UPYUN Inc.
 
 # License
 
