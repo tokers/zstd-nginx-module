@@ -1,4 +1,7 @@
 # Name
+
+[![CI](https://github.com/tokers/zstd-nginx-module/actions/workflows/ci.yml/badge.svg)](https://github.com/tokers/zstd-nginx-module/actions/workflows/ci.yml)
+
 zstd-nginx-module - Nginx module for the [Zstandard compression](https://facebook.github.io/zstd/).
 
 # Table of Contents
@@ -66,6 +69,17 @@ To use theses modules, configure your nginx branch with `--add-module=/path/to/z
 * static library will be attempted prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
 * System's zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
 * Both `ngx_http_zstd_static_module` and `ngx_http_zstd_filter_module` will be configured.
+
+## Docker Installation
+
+A Dockerfile and example configuration are provided in the `example/` directory for easy containerized deployment:
+
+```bash
+docker build -f example/Dockerfile -t nginx-zstd:latest .
+docker run -d -p 80:80 nginx-zstd:latest
+```
+
+See the [example README](example/README.md) for more details on Docker deployment and configuration examples.
 
 # Directives
 
