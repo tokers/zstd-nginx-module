@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04]
+        nginx_version: ['1.24.0', '1.25.3', '1.26.0']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libpcre3 libpcre3-dev \
+          zlib1g zlib1g-dev \
+          libssl-dev \
+          libzstd-dev \
+          perl \
+          cpanminus
+    
+    - name: Install Perl test dependencies
+      run: |
+        sudo cpanm --notest Test::Nginx
+    
+    - name: Cache nginx
+      id: cache-nginx
+      uses: actions/cache@v4
+      with:
+        path: ~/nginx-${{ matrix.nginx_version }}
+        key: nginx-${{ matrix.nginx_version }}-${{ matrix.os }}
+    
+    - name: Download and extract nginx
+      if: steps.cache-nginx.outputs.cache-hit != 'true'
+      run: |
+        cd ~
+        wget -q http://nginx.org/download/nginx-${{ matrix.nginx_version }}.tar.gz
+        tar -xzf nginx-${{ matrix.nginx_version }}.tar.gz
+    
+    - name: Configure and build nginx with zstd module
+      run: |
+        cd ~/nginx-${{ matrix.nginx_version }}
+        ./configure \
+          --prefix=/tmp/nginx \
+          --with-http_ssl_module \
+          --with-http_v2_module \
+          --add-module=${{ github.workspace }}
+        make -j$(nproc)
+        sudo make install
+    
+    - name: Add nginx to PATH
+      run: |
+        echo "/tmp/nginx/sbin" >> $GITHUB_PATH
+    
+    - name: Verify nginx installation
+      run: |
+        /tmp/nginx/sbin/nginx -V
+    
+    - name: Run tests
+      run: |
+        export PATH=/tmp/nginx/sbin:$PATH
+        cd ${{ github.workspace }}
+        prove -r t/
+      env:
+        TEST_NGINX_BINARY: /tmp/nginx/sbin/nginx
+
+  build-docker:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Build test Dockerfile
+      run: |
+        cat > Dockerfile.test << 'EOF'
+        FROM nginx:1.26.0 AS builder
+        
+        # Install build dependencies
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            libpcre3-dev \
+            zlib1g-dev \
+            libssl-dev \
+            libzstd-dev \
+            wget \
+            && rm -rf /var/lib/apt/lists/*
+        
+        # Get nginx source
+        WORKDIR /build
+        RUN wget -q http://nginx.org/download/nginx-1.26.0.tar.gz && \
+            tar -xzf nginx-1.26.0.tar.gz
+        
+        # Copy module source
+        COPY . /build/zstd-nginx-module
+        
+        # Build nginx with zstd module
+        WORKDIR /build/nginx-1.26.0
+        RUN ./configure \
+            --prefix=/etc/nginx \
+            --sbin-path=/usr/sbin/nginx \
+            --modules-path=/usr/lib/nginx/modules \
+            --conf-path=/etc/nginx/nginx.conf \
+            --error-log-path=/var/log/nginx/error.log \
+            --http-log-path=/var/log/nginx/access.log \
+            --pid-path=/var/run/nginx.pid \
+            --lock-path=/var/run/nginx.lock \
+            --http-client-body-temp-path=/var/cache/nginx/client_temp \
+            --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+            --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+            --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+            --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+            --user=nginx \
+            --group=nginx \
+            --with-http_ssl_module \
+            --with-http_realip_module \
+            --with-http_addition_module \
+            --with-http_sub_module \
+            --with-http_dav_module \
+            --with-http_flv_module \
+            --with-http_mp4_module \
+            --with-http_gunzip_module \
+            --with-http_gzip_static_module \
+            --with-http_random_index_module \
+            --with-http_secure_link_module \
+            --with-http_stub_status_module \
+            --with-http_auth_request_module \
+            --with-http_v2_module \
+            --with-http_slice_module \
+            --with-threads \
+            --with-file-aio \
+            --add-module=/build/zstd-nginx-module && \
+            make -j$(nproc) && \
+            make install
+        
+        # Runtime stage
+        FROM nginx:1.26.0
+        
+        # Install runtime dependencies
+        RUN apt-get update && apt-get install -y \
+            libzstd1 \
+            && rm -rf /var/lib/apt/lists/*
+        
+        # Copy compiled nginx with zstd module
+        COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
+        
+        # Test configuration
+        RUN nginx -V 2>&1 | grep zstd
+        
+        EXPOSE 80 443
+        CMD ["nginx", "-g", "daemon off;"]
+        EOF
+    
+    - name: Build Docker image
+      run: |
+        docker build -f Dockerfile.test -t nginx-zstd:test .
+    
+    - name: Test Docker image
+      run: |
+        # Start container
+        docker run -d --name nginx-zstd-test nginx-zstd:test
+        sleep 2
+        
+        # Check if nginx is running
+        docker ps | grep nginx-zstd-test
+        
+        # Check nginx version includes zstd
+        docker exec nginx-zstd-test nginx -V 2>&1 | grep zstd
+        
+        # Cleanup
+        docker stop nginx-zstd-test
+        docker rm nginx-zstd-test
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Check for trailing whitespace
+      run: |
+        if git grep -I --line-number -P '\s+$' -- '*.c' '*.h' 'config' 2>/dev/null; then
+          echo "Error: Found trailing whitespace"
+          exit 1
+        else
+          echo "No trailing whitespace found"
+        fi
+    
+    - name: Check file permissions
+      run: |
+        # Check that source files don't have execute permissions
+        if find . -name '*.c' -o -name '*.h' | xargs ls -l | grep '^-rwxr'; then
+          echo "Error: Source files should not be executable"
+          exit 1
+        else
+          echo "File permissions are correct"
+        fi
