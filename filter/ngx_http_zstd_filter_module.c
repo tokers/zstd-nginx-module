@@ -447,7 +447,21 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
         ctx->redo = 1;
 
-    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
+    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END
+               && ctx->buffer_in.pos >= ctx->buffer_in.size
+               && ctx->in == NULL)
+    {
+        /*
+         * 2026-05-01 (tommytaylor.co.uk): only transition to END once the
+         * current ZSTD_inBuffer is fully drained AND no more chain links
+         * are queued. Without these gates, libzstd's "131072 bytes still
+         * pending" hint return on the same body-filter call that carried
+         * last_buf=1 jumps straight to END. ZSTD_endStream emits a clean
+         * frame epilogue at the partial-input boundary, and any input
+         * beyond 131072 is silently truncated. Surfaces on single-buf
+         * static-file responses sized 131073..output_buffers_size.
+         * Upstream issue tokers/zstd-nginx-module#25.
+         */
         ctx->redo = 1;
         ctx->action = NGX_HTTP_ZSTD_FILTER_END;
 
@@ -455,7 +469,11 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
         return NGX_AGAIN;
 
-    } else {
+    } else if (ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
+        /* preserve END after ZSTD_endStream completes (rc==0) so the
+         * done-flag gate below sees action==END and marks last_buf=1.
+         * Otherwise an unconditional restore-to-COMPRESS would loop
+         * forever re-running endStream without ever setting done. */
         ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
     }
 
@@ -470,7 +488,23 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     b = ctx->out_buf;
 
-    if (rc == 0 && (ctx->flush || ctx->last)) {
+    /*
+     * 2026-05-01 (tommytaylor.co.uk truncation fix): only mark the response
+     * "done" once ZSTD_endStream has actually run (action == END). The
+     * original code set b->last_buf=1 + done=1 after a FLUSH-rc=0 cycle
+     * with last==1, even when buffer_in still had unconsumed bytes.
+     * Mechanism: input streams >131072 bytes (libzstd's ZSTD_CStreamInSize
+     * default) trigger ZSTD_compressStream to return rc=131072 (still-
+     * pending hint) → state machine flips action to FLUSH → FLUSH returns
+     * rc=0 → premature last_buf flag → next filter stops reading →
+     * 131072-byte silent truncation. Gate the EOF marker on action==END so
+     * it only fires after ZSTD_endStream has emitted the frame epilogue.
+     * Flush case (mid-stream client flush) preserves original behaviour.
+     */
+    if (rc == 0
+        && (ctx->flush
+            || (ctx->last && ctx->action == NGX_HTTP_ZSTD_FILTER_END)))
+    {
         r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
 
         b->flush = ctx->flush;
