@@ -11,9 +11,9 @@
 #include <zstd.h>
 
 
-#define NGX_HTTP_ZSTD_FILTER_COMPRESS       0
-#define NGX_HTTP_ZSTD_FILTER_FLUSH          1
-#define NGX_HTTP_ZSTD_FILTER_END            2
+#if ZSTD_VERSION_NUMBER < 10400
+#error "libzstd 1.4.0 or later required for ZSTD_compressStream2"
+#endif
 
 
 typedef struct {
@@ -57,9 +57,29 @@ typedef struct {
     size_t                       bytes_in;
     size_t                       bytes_out;
 
-    unsigned                     action:2;
+    /*
+     * Sticky-finish flags (per-call-op pattern, modelled on ngx_brotli's
+     * ngx_http_brotli_filter_module.c):
+     *
+     * - ctx->last  : set in add_data when consuming a buf with last_buf=1;
+     *                drives op = ZSTD_e_end on subsequent compress calls
+     *                until libzstd reports rc==0 (frame footer drained),
+     *                then cleared after the terminal downstream buf is
+     *                enqueued with b->last_buf=1.
+     * - ctx->flush : set in add_data when consuming a buf with flush=1;
+     *                drives op = ZSTD_e_flush on subsequent compress calls
+     *                until libzstd reports rc==0 (internal buffer drained),
+     *                then cleared after the downstream buf is enqueued
+     *                with b->flush=1.
+     *
+     * The flags are sticky to guarantee flush/end propagation even when
+     * libzstd swallows a small input chunk without producing output (rc==0
+     * on the first call). The previous action state machine (the
+     * NGX_HTTP_ZSTD_FILTER_COMPRESS/FLUSH/END enum + redo) failed in that
+     * case: it only promoted COMPRESS->FLUSH when rc>0, leaving small
+     * flush'd chunks stranded in libzstd's internal buffer. See issue #23.
+     */
     unsigned                     last:1;
-    unsigned                     redo:1;
     unsigned                     flush:1;
     unsigned                     done:1;
     unsigned                     nomem:1;
@@ -389,45 +409,46 @@ static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
     size_t             rc, pos_in, pos_out;
-    char              *hint;
     ngx_chain_t       *cl;
     ngx_buf_t         *b;
+    ngx_uint_t         has_bytes, has_signal;
     ZSTD_EndDirective  op;
+
+    /*
+     * Per-call-op pattern (ngx_brotli model): derive the libzstd endOp
+     * directive from the sticky-finish flags set in add_data when the
+     * upstream buf had last_buf=1 / flush=1. last takes precedence over
+     * flush (terminal finish overrides intermediate flush).
+     */
+    if (ctx->last) {
+        op = ZSTD_e_end;
+
+    } else if (ctx->flush) {
+        op = ZSTD_e_flush;
+
+    } else {
+        op = ZSTD_e_continue;
+    }
 
     ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd compress in: src:%p pos:%ud size: %ud, "
-                   "dst:%p pos:%ud size:%ud flush:%d redo:%d",
+                   "dst:%p pos:%ud size:%ud flush:%d last:%d",
                    ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
-                   ctx->buffer_out.size, ctx->flush, ctx->redo);
+                   ctx->buffer_out.size, ctx->flush, ctx->last);
 
     pos_in = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
-
-    switch (ctx->action) {
-
-    case NGX_HTTP_ZSTD_FILTER_FLUSH:
-        hint = "ZSTD_compressStream2(flush) ";
-        op = ZSTD_e_flush;
-        break;
-
-    case NGX_HTTP_ZSTD_FILTER_END:
-        hint = "ZSTD_compressStream2(end) ";
-        op = ZSTD_e_end;
-        break;
-
-    default:
-        hint = "ZSTD_compressStream2(continue) ";
-        op = ZSTD_e_continue;
-        break;
-    }
 
     rc = ZSTD_compressStream2(ctx->cstream, &ctx->buffer_out,
                               &ctx->buffer_in, op);
 
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "%s failed: %s", hint, ZSTD_getErrorName(rc));
+                      "ZSTD_compressStream2(%s) failed: %s",
+                      (op == ZSTD_e_end) ? "end"
+                        : (op == ZSTD_e_flush) ? "flush" : "continue",
+                      ZSTD_getErrorName(rc));
 
         return NGX_ERROR;
     }
@@ -439,30 +460,69 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size);
 
-    ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
-    ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
-    ctx->redo = 0;
-
-    if (rc > 0) {
-        if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
-            ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
-        }
-
-        ctx->redo = 1;
-
-    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
-        ctx->redo = 1;
-        ctx->action = NGX_HTTP_ZSTD_FILTER_END;
-
-        /* pending to call the ZSTD_endStream() */
-
-        return NGX_AGAIN;
-
-    } else {
-        ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
+    /*
+     * Skip the pointer arithmetic when the compressor didn't consume / emit
+     * anything. buffer_in.src may be NULL on a flush-only call (sentinel
+     * buffer with no payload); C says NULL+0 is undefined behaviour even
+     * when the delta is zero, which UBSan reports. Same logic for
+     * out_buf->last on a continue op that produced no output.
+     */
+    if (ctx->buffer_in.pos != pos_in) {
+        ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
+    }
+    if (ctx->buffer_out.pos != pos_out) {
+        ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     }
 
-    if (ngx_buf_size(ctx->out_buf) == 0) {
+    /*
+     * Zero-progress guard (see ngx_brotli's body-filter loop): in
+     * ZSTD_e_continue mode the encoder is required to make forward
+     * progress (per the ZSTD_compressStream2 contract in zstd.h). If it
+     * consumed no input and produced no output, treat this as a fatal
+     * tripwire to avoid spinning the body-filter loop indefinitely.
+     * Flush/end ops may legitimately make no progress once the buffer is
+     * fully drained (rc==0), so guard only the continue case.
+     */
+    if (op == ZSTD_e_continue
+        && ctx->buffer_in.pos == pos_in
+        && ctx->buffer_out.pos == pos_out
+        && rc == 0)
+    {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "zstd compress made no progress, aborting");
+        return NGX_ERROR;
+    }
+
+    /*
+     * Unified post-compress handling. Two orthogonal axes decide what
+     * we emit downstream:
+     *
+     *   has_signal -- is there a finish-op boundary to deliver? Yes iff
+     *                 rc == 0 and op is ZSTD_e_flush / ZSTD_e_end
+     *                 (libzstd reports the op as fully drained).
+     *
+     *   has_bytes  -- are there compressed bytes in out_buf?
+     *
+     * Cases:
+     *   * !has_signal && !has_bytes -- return NGX_AGAIN. Either rc > 0
+     *     (encoder still has bytes pending; outer loop will call back
+     *     with a fresh out_buf via get_buf) or op was ZSTD_e_continue
+     *     with rc == 0 (input consumed without spill; outer loop will
+     *     call back with the next chain link). The zero-progress guard
+     *     above already caught the pathological no-progress continue.
+     *   * has_bytes (with or without signal) -- enqueue ctx->out_buf,
+     *     attaching b->flush=1 / b->last_buf=1 if has_signal.
+     *   * has_signal && !has_bytes -- enqueue a *separate* zero-size
+     *     sync buf (NOT ctx->out_buf, which is a recycled temporary; the
+     *     write filter rejects zero-size temporary bufs via
+     *     ngx_buf_special; see ngx_buf.h). Without this branch the
+     *     flush/end boundary is invisible to the writer -- the
+     *     flush-promotion bug (issue #23) this migration targets.
+     */
+    has_bytes  = (ngx_buf_size(ctx->out_buf) != 0);
+    has_signal = (rc == 0 && (op == ZSTD_e_flush || op == ZSTD_e_end));
+
+    if (!has_bytes && !has_signal) {
         return NGX_AGAIN;
     }
 
@@ -471,19 +531,43 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_ERROR;
     }
 
-    b = ctx->out_buf;
+    if (has_bytes) {
+        b = ctx->out_buf;
+        ctx->bytes_out += ngx_buf_size(b);
 
-    if (rc == 0 && (ctx->flush || ctx->last)) {
-        r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
+    } else {
+        /*
+         * Zero-size signal-only buf. No memory flags; the writer's
+         * ngx_buf_special() accepts (flush || last_buf || sync) only
+         * when !in_memory && !in_file (see ngx_buf.h).
+         */
+        b = ngx_calloc_buf(r->pool);
+        if (b == NULL) {
+            return NGX_ERROR;
+        }
 
-        b->flush = ctx->flush;
-        b->last_buf = ctx->last;
-
-        ctx->done = ctx->last;
-        ctx->flush = 0;
+        b->sync = 1;
     }
 
-    ctx->bytes_out += ngx_buf_size(b);
+    /*
+     * Shared finalize: when libzstd has fully drained the current finish
+     * op (has_signal), attach the matching downstream marker and clear the
+     * sticky flag so add_data can dequeue the next chain link on the
+     * subsequent outer-loop pass.
+     */
+    if (has_signal) {
+        r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
+
+        if (op == ZSTD_e_end) {
+            b->last_buf = 1;
+            ctx->done = 1;
+            ctx->last = 0;
+
+        } else {
+            b->flush = 1;
+            ctx->flush = 0;
+        }
+    }
 
     cl->next = NULL;
     cl->buf = b;
@@ -491,19 +575,27 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     *ctx->last_out = cl;
     ctx->last_out = &cl->next;
 
-    ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
+    if (has_bytes) {
+        ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
+    }
 
-    return ctx->last && rc == 0 ? NGX_OK : NGX_AGAIN;
+    return ctx->done ? NGX_OK : NGX_AGAIN;
 }
 
 
 static ngx_int_t
 ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
+    /*
+     * Sticky-flag head-of-line: while ctx->last or ctx->flush is set we
+     * have an in-flight finish op (ZSTD_e_end / ZSTD_e_flush) that has not
+     * yet drained (rc > 0 from the previous compress call). Stay on the
+     * current buffer_in (typically empty) so the caller re-enters
+     * filter_compress to drain libzstd's internal buffer.
+     */
     if (ctx->buffer_in.pos < ctx->buffer_in.size
         || ctx->flush
-        || ctx->last
-        || ctx->redo)
+        || ctx->last)
     {
         return NGX_OK;
     }
@@ -518,11 +610,29 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->in_buf = ctx->in->buf;
     ctx->in = ctx->in->next;
 
-    if (ctx->in_buf->flush) {
-        ctx->flush = 1;
+    /*
+     * Drop empty non-control bufs (brotli pattern). An empty buf with
+     * neither last_buf nor flush carries no information but would otherwise
+     * still drive a useless ZSTD_e_continue call. Return NGX_AGAIN so the
+     * outer add_data loop pulls the next link.
+     */
+    if (ngx_buf_size(ctx->in_buf) == 0
+        && !ctx->in_buf->last_buf
+        && !ctx->in_buf->flush)
+    {
+        return NGX_AGAIN;
+    }
 
-    } else if (ctx->in_buf->last_buf) {
+    /*
+     * Set sticky flags immediately on consuming the buf. last_buf takes
+     * precedence: a buf with both flags set transitions us directly to the
+     * terminal end-of-stream op.
+     */
+    if (ctx->in_buf->last_buf) {
         ctx->last = 1;
+
+    } else if (ctx->in_buf->flush) {
+        ctx->flush = 1;
     }
 
     ctx->buffer_in.src = ctx->in_buf->pos;
@@ -530,10 +640,6 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->buffer_in.size = ngx_buf_size(ctx->in_buf);
 
     ctx->bytes_in += ngx_buf_size(ctx->in_buf);
-
-    if (ctx->buffer_in.size == 0) {
-        return NGX_AGAIN;
-    }
 
     return NGX_OK;
 }
@@ -603,41 +709,40 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
         return NULL;
     }
 
-    /* TODO use the advanced initialize functions */
+    /*
+     * Modern (libzstd >= 1.4.0) init sequence: explicit session-only reset
+     * followed by either a CDict ref or an explicit compression level
+     * parameter. Replaces the legacy ZSTD_initCStream /
+     * ZSTD_initCStream_usingCDict path (and the >= 1.5.0 version gate around
+     * the deprecated usingCDict call); equivalent on a freshly created CCtx
+     * with no advanced parameters set.
+     */
+    rc = ZSTD_CCtx_reset(cstream, ZSTD_reset_session_only);
+    if (ZSTD_isError(rc)) {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "ZSTD_CCtx_reset() failed: %s",
+                      ZSTD_getErrorName(rc));
+
+        goto failed;
+    }
 
     if (zlcf->dict) {
-#if ZSTD_VERSION_NUMBER >= 10500
-        rc = ZSTD_CCtx_reset(cstream, ZSTD_reset_session_only);
-        if (ZSTD_isError(rc)) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "ZSTD_CCtx_reset() failed: %s",
-                          ZSTD_getErrorName(rc));
-            goto failed;
-        }
-
         rc = ZSTD_CCtx_refCDict(cstream, zlcf->dict);
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                           "ZSTD_CCtx_refCDict() failed: %s",
-                          ZSTD_getErrorName(rc));
-            goto failed;
-        }
-#else
-        rc = ZSTD_initCStream_usingCDict(cstream, zlcf->dict);
-#endif
-        if (ZSTD_isError(rc)) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "ZSTD_initCStream_usingCDict() failed: %s",
                           ZSTD_getErrorName(rc));
 
             goto failed;
         }
 
     } else {
-        rc = ZSTD_initCStream(cstream, zlcf->level);
+        rc = ZSTD_CCtx_setParameter(cstream, ZSTD_c_compressionLevel,
+                                    (int) zlcf->level);
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "ZSTD_initCStream() failed: %s",
+                          "ZSTD_CCtx_setParameter(compressionLevel) "
+                          "failed: %s",
                           ZSTD_getErrorName(rc));
 
             goto failed;
