@@ -388,10 +388,11 @@ failed:
 static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    size_t        rc, pos_in, pos_out;
-    char         *hint;
-    ngx_chain_t  *cl;
-    ngx_buf_t    *b;
+    size_t             rc, pos_in, pos_out;
+    char              *hint;
+    ngx_chain_t       *cl;
+    ngx_buf_t         *b;
+    ZSTD_EndDirective  op;
 
     ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd compress in: src:%p pos:%ud size: %ud, "
@@ -406,21 +407,23 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     switch (ctx->action) {
 
     case NGX_HTTP_ZSTD_FILTER_FLUSH:
-        hint = "ZSTD_flushStream() ";
-        rc = ZSTD_flushStream(ctx->cstream, &ctx->buffer_out);
+        hint = "ZSTD_compressStream2(flush) ";
+        op = ZSTD_e_flush;
         break;
 
     case NGX_HTTP_ZSTD_FILTER_END:
-        hint = "ZSTD_endStream() ";
-        rc = ZSTD_endStream(ctx->cstream, &ctx->buffer_out);
+        hint = "ZSTD_compressStream2(end) ";
+        op = ZSTD_e_end;
         break;
 
     default:
-        hint = "ZSTD_compressStream() ";
-        rc = ZSTD_compressStream(ctx->cstream, &ctx->buffer_out,
-                                 &ctx->buffer_in);
+        hint = "ZSTD_compressStream2(continue) ";
+        op = ZSTD_e_continue;
         break;
     }
+
+    rc = ZSTD_compressStream2(ctx->cstream, &ctx->buffer_out,
+                              &ctx->buffer_in, op);
 
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
