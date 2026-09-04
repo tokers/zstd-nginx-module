@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# Gate: the tree run-scenario.sh is about to boot must be a TEST_HARNESS build.
+# This scenario reads the setparam_calls counter out of the probe document,
+# and without both TEST_HARNESS=1 and -DNGX_TEST_HARNESS the probe endpoint
+# compiles out entirely -- `nginx -t` would then reject the `zstd_probe;` in
+# nginx.conf and the scenario would red for a build reason rather than a
+# module one.
+#
+# Derived the same way run-scenario.sh/lib.sh resolve the build tree, so this
+# gate can never SKIP a tree the engine would boot fine or pass one it would
+# reject -- identical reasoning to fault-arms/requires and alloc-neutral's.
+set -euo pipefail
+
+FLAVOR="${2:-nginx}"
+VERSION="${3:-1.31.3}"
+BUILD="${PROBER_BUILD:-${PROBER_ROOT:-$(cd ../.. && pwd)}/.build/${FLAVOR}-${VERSION}}"
+SO="$BUILD/objs/ngx_http_zstd_filter_module.so"
+
+if [ ! -f "$SO" ]; then
+    echo "ngx_http_zstd_filter_module.so not found at $SO -- build it first"
+    exit 1
+fi
+
+PROBE_SYMBOLS="$(nm "$SO" 2>/dev/null | grep -c ' ngx_test_probe_' || true)"
+if [ "$PROBE_SYMBOLS" -eq 0 ]; then
+    echo "$SO carries no ngx_test_probe_* symbols -- this is a packaged (non-harness) build; configure with TEST_HARNESS=1 CFLAGS=\"\$CFLAGS -DNGX_TEST_HARNESS\" first"
+    exit 1
+fi
+
+# Every call-count oracle here is PAIRED with a decode of the same response
+# against the origin bytes, because a call count on its own is satisfied by a
+# response that is fast and wrong. A missing decoder would silently weaken
+# every one of them to "200 and some bytes". Fail here instead: a gate that
+# cannot run its assertion is not a gate.
+if ! command -v zstd >/dev/null 2>&1; then
+    echo "zstd(1) not found -- every oracle decodes its response and compares it byte-for-byte with the origin file"
+    exit 1
+fi
+
+# openssl(1) is gated on exactly the same reasoning, and it is the CLI that is
+# required, not libssl: the driver shells out to `openssl dgst`/`openssl base64`
+# to derive the Available-Dictionary hash the dcz arm negotiates with. Without
+# it that arm cannot run.
+#
+# It is a hard gate rather than a driver-side SKIP deliberately. A SKIP prints
+# an "ok ... # SKIP" line, which reads as a pass to every consumer that greps
+# for the oracle -- so the dcz arm would assert nothing while the run stayed
+# green, which is the false green this scenario exists to remove. Failing the
+# whole scenario here is loud and impossible to misread.
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl(1) not found -- the dcz arm derives its Available-Dictionary hash with \"openssl dgst -sha256 | openssl base64\"; the CLI is required, not just libssl"
+    exit 1
+fi
+
+# Stage the dictionary fixture the dcz and trained-dict arms need.
+#
+# It has to exist before nginx runs its CONFIG TEST -- zstd_dcz_dict_file and
+# zstd_dict_file open their file at configuration time, so a driver-written
+# fixture is far too late (the prefix the driver writes into is not created
+# until prober_render_conf, immediately before that config test). This gate is
+# the only hook that runs earlier, so it stages the file and the conf
+# references it through @BUILD_OBJS@, the one absolute path the renderer
+# substitutes that exists this early.
+#
+# Copied from the repo's own checked-in ci/t/suite/dcz-dict rather than
+# generated, so the dcz arm here negotiates against exactly the dictionary
+# 03-dcz.t already pins the wire contract against.
+DICT_SRC="$(cd "$(dirname "$0")/../../suite" && pwd)/dcz-dict"
+if [ ! -f "$DICT_SRC" ]; then
+    echo "dictionary fixture not found at $DICT_SRC"
+    exit 1
+fi
+if ! cp -f "$DICT_SRC" "$BUILD/objs/setparam-call-count.dict"; then
+    echo "cannot stage the dictionary fixture into $BUILD/objs"
+    exit 1
+fi
+
+exit 0

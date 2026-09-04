@@ -1,0 +1,9 @@
+---
+name: runtime
+on:
+  workflow_call:
+jobs:
+  runtime:  # owns the 189xx band
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 ci/tools/test_runtime.py

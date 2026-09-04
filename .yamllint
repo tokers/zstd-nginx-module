@@ -1,0 +1,25 @@
+# yamllint config for nginx-skeleton-module -- used by ci/linter/lint-yaml.sh
+# and by any editor integration, so both agree.
+#
+# GitHub Actions workflows are not hand-written prose YAML; three default rules
+# fight their syntax rather than catching bugs:
+#   document-start  a workflow never starts with ---, and adding one everywhere
+#                   is churn with no reader benefit.
+#   truthy          `on:` is the trigger key, not the boolean `on`. check-keys
+#                   off keeps the rule live for VALUES (yes/no/on/off), which is
+#                   where a real YAML 1.1 surprise bites.
+#   line-length     inline `run:` shell and ${{ }} expressions legitimately run
+#                   long. 120 as a WARNING: visible, not blocking. lint-yaml.sh
+#                   deliberately does not pass --strict, so warnings do not fail
+#                   the gate -- errors (real syntax/structure problems) do.
+extends: default
+
+rules:
+  document-start: disable
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  line-length:
+    max: 120
+    level: warning

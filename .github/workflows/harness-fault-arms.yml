@@ -1,0 +1,118 @@
+---
+name: Harness Fault Arms
+
+# Fast nginx-module-testkit consumer gate. One harness-enabled nginx build runs
+# all six module-specific scenarios through ci/tools/run-testkit-scenarios.sh:
+# codec and pool-allocation faults, allocation neutrality, codec call counts,
+# and dictionary/no-dictionary setParameter call counts. The shared runner owns
+# expected-log allowances and non-vacuity/property witnesses, so PR, coverage,
+# and deep Memcheck surfaces cannot silently select different scenario sets.
+#
+# The upstream testkit's generic consumer-zstd fixture cannot replace these:
+# its consumers/ tree is gitignored, so it SKIPs against this module in testkit
+# CI. This repository builds the real module with TEST_HARNESS=1 plus
+# -DNGX_TEST_HARNESS and rejects a probe-free binary before running anything.
+#
+# The fixed job name is a check-name contract. It remains visible on every PR
+# and is selected by ci.yml on merged master so the separately documented
+# green-week promotion criterion has a stable branch signal. It is not
+# required yet.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HARNESS_NGINX_VERSION: "1.31.5"
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: harness-fault-arms-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  harness-fault-arms:
+    name: Harness Fault Arms
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout module (with harness submodule)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Cache apt packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/apt-archives/*.deb
+          key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl-nghttp2
+          restore-keys: apt-harness-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/apt-archives"
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            "Dir::Cache::archives \"$RUNNER_TEMP/apt-archives\";" \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libnghttp2-dev libpcre2-dev libssl-dev \
+            libzstd-dev pkg-config wget zlib1g-dev
+
+      - name: Fetch verified nginx source
+        run: |
+          set -euo pipefail
+          bash ci/tools/fetch-verified-nginx.sh "$HARNESS_NGINX_VERSION"
+          echo "NGINX_SRC_DIR=$GITHUB_WORKSPACE/nginx-$HARNESS_NGINX_VERSION" >> "$GITHUB_ENV"
+
+      - name: Configure and build harness nginx
+        run: |
+          set -euo pipefail
+          cd "$NGINX_SRC_DIR"
+          TEST_HARNESS=1 \
+          CFLAGS="${CFLAGS:-} -DNGX_TEST_HARNESS -Wextra -Werror" \
+          ./configure \
+            --prefix=/etc/nginx \
+            --with-http_ssl_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Prove the module carries testkit probes
+        run: |
+          set -euo pipefail
+          SO="$NGINX_SRC_DIR/objs/ngx_http_zstd_filter_module.so"
+          COUNT=$(nm "$SO" | grep -c ' ngx_test_probe_' || true)
+          echo "ngx_test_probe_* symbols: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::harness module carries zero ngx_test_probe_* symbols"
+            exit 1
+          fi
+
+      - name: Build nginx-module-testkit tools
+        run: bash ci/t/harness/ci/prober/build.sh
+
+      - name: Run all module testkit scenarios
+        run: >-
+          ci/tools/run-testkit-scenarios.sh
+          --build "$NGINX_SRC_DIR"
+          --version "$HARNESS_NGINX_VERSION"
+          --log-dir "$GITHUB_WORKSPACE"
+
+      - name: Upload TAP logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: harness-scenario-tap-logs
+          path: "*-tap.log"
+          retention-days: 7
+          if-no-files-found: ignore

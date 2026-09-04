@@ -1,0 +1,117 @@
+name: Bump versions
+
+# Weekly: check the upstream release feeds for newer releases than what's
+# pinned here -- nginx-stable/angie in ci-deep.yml's build-flavors matrix,
+# the harness jobs' static mainline pin (HARNESS_NGINX_VERSION in ci-deep.yml
+# and harness-fault-arms.yml), and the Windows build's sources in
+# ci/tools/windows-pins.sh. The matrix's own mainline entry is resolved
+# dynamically at CI run time (build-test.yml's `resolve` job / ci-deep.yml's
+# per-job resolve steps) and has no static pin; ci/tools/bump-versions.sh's
+# header lists exactly what is and is not bumped.
+#
+# ci/tools/bump-versions.sh does the actual work (also runnable locally with
+# --dry-run to preview). Opens a PR rather than pushing straight to master --
+# master carries a required-pull-request ruleset with no bypass actor, so a
+# direct push is always rejected (audit sha e289021 F4); the bot instead
+# pushes a branch and opens a PR via BUMP_PR_TOKEN (a classic PAT -- the
+# default GITHUB_TOKEN cannot create PRs on myguard-labs repos). Normal
+# review/required-checks still gate the merge.
+#
+# BUMP_PR_TOKEN authenticates BOTH halves: gh (via GH_TOKEN) for the PR, and
+# git (via GIT_ASKPASS) for the branch push. persist-credentials is false, so
+# the push has no ambient credential of its own -- without the askpass helper
+# it dies on "could not read Username for 'https://github.com'".
+#
+# Action pins (keep in sync with build-test.yml):
+# actions/checkout@v5.1.0 -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+on:
+  schedule:
+    # Weekly, Monday 04:00 UTC.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: bump-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump version pins
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # This scheduled workflow also falls back to ubuntu-latest for forks.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gh git gnupg python3
+
+      - name: Run bump script
+        id: bump
+        env:
+          # The angie release lookup hits api.github.com; unauthenticated the
+          # shared runner IP is rate-limited to 403s.
+          GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
+        run: bash ci/tools/bump-versions.sh
+
+      - name: Open PR if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
+          BUMP_PR_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "nothing changed, skipping PR"
+            exit 0
+          fi
+          branch="bump/versions-$(date -u +%Y%m%d)"
+          git config user.name "myguard-bump-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "chore: bump version pins
+
+          Automated weekly version check (ci/tools/bump-versions.sh)."
+          # persist-credentials is false, so the checkout leaves no git
+          # credential behind and a plain `git push` prompts for a username
+          # (fatal: could not read Username, run 29722422889). GH_TOKEN
+          # authenticates gh but not git, so hand git its own credential via
+          # the askpass helper -- keeps the token out of argv and out of
+          # .git/config, unlike an inline x-access-token@ push URL.
+          git config credential.helper ''
+          askpass="$(mktemp)"
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) echo x-access-token ;;
+            *) printf '%s' "$BUMP_PR_TOKEN" ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          # Force-push: the branch name is date-based, so a same-day re-run
+          # (a manual dispatch, or a retry after a failure) collides with the
+          # branch the earlier run created and is otherwise rejected
+          # non-fast-forward. The branch is bot-owned and disposable.
+          GIT_ASKPASS="$askpass" git push --force-with-lease origin "$branch"
+          rm -f "$askpass"
+          # An open PR for this branch may already exist from that earlier
+          # run; the push above has refreshed it, so there is nothing to do.
+          if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[0].number')" ]; then
+            echo "PR for $branch already open, refreshed by the push"
+            exit 0
+          fi
+          gh pr create \
+            --title "chore: bump version pins ($(date -u +%Y-%m-%d))" \
+            --body "Automated weekly version check (ci/tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
+            --base master \
+            --head "$branch"

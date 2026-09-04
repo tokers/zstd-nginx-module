@@ -1,0 +1,22 @@
+id: c-format-string
+language: c
+severity: warning
+message: >-
+  Non-literal format string — printf/fprintf/syslog/ngx_*printf with a variable
+  as the format argument. If that variable carries user input it is a
+  format-string vuln (%n write, info leak). Use a literal "%s" and pass the data
+  as an argument.
+note: >-
+  Fires when the call contains no string literal at all (best-effort — the
+  format arg position varies by function). Dismiss if the format is a trusted
+  constant/enum-mapped literal.
+rule:
+  kind: call_expression
+  all:
+    - has:
+        field: function
+        regex: ^(printf|fprintf|dprintf|vprintf|vfprintf|syslog|vsyslog)$
+    - not:
+        has:
+          kind: string_literal
+          stopBy: end

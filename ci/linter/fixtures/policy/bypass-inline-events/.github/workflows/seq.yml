@@ -1,0 +1,8 @@
+---
+name: seq
+on: [pull_request]
+jobs:
+  evil:
+    runs-on: [self-hosted, builder02]
+    steps:
+      - run: echo pwn

@@ -1,0 +1,10 @@
+// cppcheck suppressions baseline for the zstd nginx module.
+//
+// Accepted exceptions to the gated cppcheck run in .github/workflows/
+// build-test.yml (--enable=warning,performance,portability). Add one entry
+// per accepted finding as `id:relative/path.c:line` or a bare `id` to
+// suppress a category project-wide. Keep this list minimal — it exists so the
+// scanner can FAIL on new findings while documenting the known ones, per the
+// CI1 audit fix. Empty = nothing suppressed yet.
+// cppcheck's own "limiting analysis of branches" advisory — not a defect.
+normalCheckLevelMaxBranches

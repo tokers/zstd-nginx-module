@@ -1,0 +1,16 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - run: echo build
+      - shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://example.invalid/tool.tgz" -OutFile tool.tgz
+      - shell: pwsh
+        run: |
+          tar -xzf tool.tgz
+          ./tool/configure

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# Gate: the tree run-scenario.sh is about to boot must be a TEST_HARNESS
+# build. This scenario reads the setparam_calls counter out of the probe
+# document, and without both TEST_HARNESS=1 and -DNGX_TEST_HARNESS the probe
+# endpoint compiles out entirely -- `nginx -t` would then reject the
+# `zstd_probe;` in nginx.conf and the scenario would red for a build reason
+# rather than a module one.
+#
+# No dictionary fixture to stage here -- this scenario's whole point is a
+# conf with no zstd_dict_file / zstd_dcz_dict_file anywhere in it, so the
+# dict-staging step the sibling setparam-call-count scenario needs does not
+# apply.
+#
+# Derived the same way run-scenario.sh/lib.sh resolve the build tree, so this
+# gate can never SKIP a tree the engine would boot fine or pass one it would
+# reject -- identical reasoning to fault-arms/requires and alloc-neutral's.
+set -euo pipefail
+
+FLAVOR="${2:-nginx}"
+VERSION="${3:-1.31.3}"
+BUILD="${PROBER_BUILD:-${PROBER_ROOT:-$(cd ../.. && pwd)}/.build/${FLAVOR}-${VERSION}}"
+SO="$BUILD/objs/ngx_http_zstd_filter_module.so"
+
+if [ ! -f "$SO" ]; then
+    echo "ngx_http_zstd_filter_module.so not found at $SO -- build it first"
+    exit 1
+fi
+
+PROBE_SYMBOLS="$(nm "$SO" 2>/dev/null | grep -c ' ngx_test_probe_' || true)"
+if [ "$PROBE_SYMBOLS" -eq 0 ]; then
+    echo "$SO carries no ngx_test_probe_* symbols -- this is a packaged (non-harness) build; configure with TEST_HARNESS=1 CFLAGS=\"\$CFLAGS -DNGX_TEST_HARNESS\" first"
+    exit 1
+fi
+
+if ! command -v zstd >/dev/null 2>&1; then
+    echo "zstd(1) not found -- the oracle decodes its response and compares it byte-for-byte with the origin file"
+    exit 1
+fi
+
+exit 0

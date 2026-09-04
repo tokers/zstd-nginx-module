@@ -1,0 +1,16 @@
+id: c-assign-in-if
+language: c
+severity: warning
+message: >-
+  Assignment inside an `if`/`while` condition (`if (x = f())`) — almost always a
+  typo for `==`, and silently tests the assigned value. If intentional, wrap in
+  extra parens `if ((x = f()))` to signal intent and silence -Wparentheses.
+note: Fires on the bare form; the `((x = f()))` idiom nests deeper and won't match.
+rule:
+  any:
+    - kind: if_statement
+    - kind: while_statement
+  has:
+    field: condition
+    has:
+      kind: assignment_expression

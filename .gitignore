@@ -1,54 +1,77 @@
-# Prerequisites
-*.d
-
-# Object files
+# C build artifacts
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
+*.d
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
 *.so.*
-*.dylib
+*.lo
+*.la
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+# Compiled nginx modules
+*.so
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# nginx build tree (when building out-of-tree inside this repo)
+objs/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# tools/ci-build.sh persistent build tree (nginx/angie source + compiled
+# binaries, one dir per flavor-version)
+.build/
 
-t/servroot/*
+# Local analysis and task-runner caches
+.grind-wt/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Test runner working directories (nginx test::nginx servroot)
+ci/t/servroot/
+ci/t/servroot-*/
+
+# Test::Nginx defaults to t/servroot/ relative to CWD when
+# TEST_NGINX_SERVROOT is unset (e.g. `prove ci/t/foo.t` run from the repo
+# root). CI always sets TEST_NGINX_SERVROOT explicitly, so this is narrowly
+# scoped to the generated servroot dir rather than ignoring all of `t/`,
+# which could later mask a real source directory.
+/t/servroot/
+/t/servroot-*/
+
+# Python bytecode cache (test tooling under tools/)
+__pycache__/
+*.pyc
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# CI / local build leftovers
+*.log
+*.pid
+
+# Fuzzing build artifacts (seed corpus IS tracked; everything else is not)
+ci/fuzz/fuzz_accept_encoding
+ci/fuzz/generated_parser.inc
+ci/fuzz/fuzz_dcz
+ci/fuzz/generated_dcz.inc
+ci/fuzz/crash-*
+ci/fuzz/corpus-min/
+ci/fuzz/corpus-dcz-min/
+ci/fuzz/*.profraw
+# Local fuzz runs dump discovered units into corpus/; keep only the
+# curated NN_name seeds under version control.
+ci/fuzz/corpus/*
+!ci/fuzz/corpus/[0-9][0-9]_*
+
+# Unit test build artifacts (source + run.sh IS tracked)
+ci/tests/unit/test_accept_encoding
+ci/tests/unit/test_accept_encoding_chain
+ci/tests/unit/test_accept_encoding_legacy
+ci/tests/unit/test_static_probe
+ci/tests/unit/test_version_policy
+ci/tests/unit/*.gcda
+ci/tests/unit/*.gcno

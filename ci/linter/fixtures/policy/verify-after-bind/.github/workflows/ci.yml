@@ -1,0 +1,16 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  test-nginx:
+    runs-on: ubuntu-latest
+    env:
+      TEST_BASE_PORT: '19200'
+    steps:
+      - run: echo build
+      # Binds the band. Everything the verifier below could have caught for
+      # this step has already happened by the time it runs.
+      - run: prove -v ci/t/
+      - run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+      - run: python3 ci/tools/test_runtime.py --port "$TEST_BASE_PORT"

@@ -1,0 +1,421 @@
+---
+# yamllint disable rule:line-length rule:truthy
+name: Windows build
+
+# MSVC and MinGW exercise different nginx win32 build paths. MSVC supports
+# static addons only; MinGW's GNU linker also supports dynamic PE modules.
+
+on:
+  workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point (step 15).
+  workflow_call: {}
+
+concurrency:
+  group: windows-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # The source pins (nginx, pcre2, zlib: version + sha256) are NOT here: each
+  # job's first step reads them from ci/tools/windows-pins.sh, the one place
+  # they live (shared with ci/tools/build-windows.sh, bumped by
+  # ci/tools/bump-versions.sh).
+
+jobs:
+  msvc:
+    name: MSVC x64 static
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Load the pinned sources
+        # Only the six values this workflow consumes are exported; the pins
+        # file also carries OpenSSL/nasm/zstd for build-windows.sh.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . ci/tools/windows-pins.sh
+          for v in VER_NGINX SHA_NGINX VER_PCRE2 SHA_PCRE2 VER_ZLIB SHA_ZLIB; do
+            [ -n "${!v:-}" ] || { echo "::error::ci/tools/windows-pins.sh does not set $v"; exit 1; }
+          done
+          {
+            echo "NGINX_VERSION=$VER_NGINX"
+            echo "NGINX_SHA256=$SHA_NGINX"
+            echo "PCRE2_VERSION=$VER_PCRE2"
+            echo "PCRE2_SHA256=$SHA_PCRE2"
+            echo "ZLIB_VERSION=$VER_ZLIB"
+            echo "ZLIB_SHA256=$SHA_ZLIB"
+          } >> "$GITHUB_ENV"
+
+      - name: Install static libzstd
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install zstd:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg failed with $LASTEXITCODE" }
+          $lib = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib"
+          if (-not (Test-Path "$lib\zstd_static.lib")) {
+            if (-not (Test-Path "$lib\zstd.lib")) { throw "vcpkg zstd archive not found" }
+            Copy-Item "$lib\zstd.lib" "$lib\zstd_static.lib"
+          }
+
+      - name: Fetch and verify sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sources = @(
+            @{ file = "nginx-$env:NGINX_VERSION.tar.gz"; url = "https://nginx.org/download/nginx-$env:NGINX_VERSION.tar.gz"; sha = $env:NGINX_SHA256 },
+            @{ file = "pcre2-$env:PCRE2_VERSION.tar.gz"; url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$env:PCRE2_VERSION/pcre2-$env:PCRE2_VERSION.tar.gz"; sha = $env:PCRE2_SHA256 },
+            @{ file = "zlib-$env:ZLIB_VERSION.tar.gz"; url = "https://github.com/madler/zlib/releases/download/v$env:ZLIB_VERSION/zlib-$env:ZLIB_VERSION.tar.gz"; sha = $env:ZLIB_SHA256 }
+          )
+          foreach ($s in $sources) {
+            Invoke-WebRequest -Uri $s.url -OutFile $s.file -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+            $actual = (Get-FileHash $s.file -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $s.sha) { throw "sha256 mismatch for $($s.file): $actual" }
+            tar -xzf $s.file
+            if ($LASTEXITCODE -ne 0) { throw "tar failed for $($s.file)" }
+          }
+
+      - name: Locate MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = "$root\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found" }
+          "VCVARS=$vcvars" >> $env:GITHUB_ENV
+
+      - name: Configure
+        # Configure is a bash script, but every compiler probe needs the
+        # environment installed by vcvars64.bat in this same cmd process.
+        shell: cmd  # zizmor: ignore[misfeature]
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          call "%VCVARS%" || exit /b 1
+          bash "%GITHUB_WORKSPACE:\=/%/.github/scripts/configure-msvc.sh" || exit /b 1
+
+      - name: Pre-build PCRE2 and zlib
+        shell: cmd  # zizmor: ignore[misfeature]
+        run: |
+          call "%VCVARS%" || exit /b 1
+          cd pcre2-%PCRE2_VERSION% || exit /b 1
+          copy /y src\config.h.generic src\config.h || exit /b 1
+          copy /y src\pcre2.h.generic src\pcre2.h || exit /b 1
+          copy /y src\pcre2_chartables.c.dist src\pcre2_chartables.c || exit /b 1
+          cl -c -O2 -MT -DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=8 -DPCRE2_STATIC -Isrc ^
+            src\pcre2_auto_possess.c src\pcre2_chartables.c src\pcre2_compile.c ^
+            src\pcre2_config.c src\pcre2_context.c src\pcre2_convert.c ^
+            src\pcre2_dfa_match.c src\pcre2_error.c src\pcre2_extuni.c ^
+            src\pcre2_find_bracket.c src\pcre2_maketables.c src\pcre2_match.c ^
+            src\pcre2_match_data.c src\pcre2_newline.c src\pcre2_ord2utf.c ^
+            src\pcre2_pattern_info.c src\pcre2_script_run.c src\pcre2_serialize.c ^
+            src\pcre2_string_utils.c src\pcre2_study.c src\pcre2_substitute.c ^
+            src\pcre2_substring.c src\pcre2_tables.c src\pcre2_ucd.c ^
+            src\pcre2_valid_utf.c src\pcre2_xclass.c || exit /b 1
+          link -lib -out:pcre2-8.lib *.obj || exit /b 1
+          cd ..\zlib-%ZLIB_VERSION% || exit /b 1
+          cl -c -O2 -MT adler32.c crc32.c deflate.c infback.c inffast.c inflate.c inftrees.c trees.c zutil.c compress.c uncompr.c gzclose.c gzlib.c gzread.c gzwrite.c || exit /b 1
+          link -lib -out:zlib.lib *.obj || exit /b 1
+
+      - name: Build
+        shell: cmd  # zizmor: ignore[misfeature]
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          call "%VCVARS%" || exit /b 1
+          nmake -f objs/Makefile || exit /b 1
+
+      - name: Verify static modules and directives
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $table = Get-Content objs\ngx_modules.c -Raw
+          foreach ($name in 'ngx_http_zstd_filter_module', 'ngx_http_zstd_static_module') {
+            if ($table -notmatch $name) { throw "$name absent from ngx_modules.c" }
+          }
+          New-Item -ItemType Directory -Force conf, logs | Out-Null
+          function Test-Directive([string]$directive, [bool]$valid) {
+            @('events {}', 'http {', "server { listen 8080; $directive }", '}') | Set-Content -Encoding ascii conf/nginx.conf
+            & .\objs\nginx.exe -t -p . -c conf/nginx.conf 2>$null
+            if (($LASTEXITCODE -eq 0) -ne $valid) { throw "unexpected verdict for: $directive" }
+          }
+          Test-Directive 'zstd on; zstd_static on;' $true
+          Test-Directive 'zstd_not_a_directive on;' $false
+          exit 0
+
+      - name: Run static request smoke
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check --no-input zstandard==0.25.0
+          New-Item -ItemType Directory -Force conf, logs, html | Out-Null
+          @'
+          import pathlib, zstandard
+
+          root = pathlib.Path("html")
+          plain = b"windows static zstd smoke\n" * 256
+          root.joinpath("plain.txt").write_bytes(plain)
+          root.joinpath("static.txt").write_bytes(plain)
+          root.joinpath("static.txt.zst").write_bytes(zstandard.ZstdCompressor().compress(plain))
+          '@ | Set-Content -Encoding ascii make-smoke-files.py
+          python make-smoke-files.py
+          @'
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:18080;
+                  root html;
+                  zstd on;
+                  zstd_types text/plain;
+                  zstd_static on;
+              }
+          }
+          '@ | Set-Content -Encoding ascii conf/nginx.conf
+          @'
+          events {}
+          http { server { listen 127.0.0.1:18080; zstd_not_a_directive on; } }
+          '@ | Set-Content -Encoding ascii conf/invalid.conf
+          & .\objs\nginx.exe -t -p . -c conf/invalid.conf 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            throw 'invalid zstd directive was accepted'
+          }
+          & .\objs\nginx.exe -t -p . -c conf/nginx.conf
+          if ($LASTEXITCODE -ne 0) { throw "nginx -t failed with $LASTEXITCODE" }
+          try {
+            $nginx = Start-Process -FilePath .\objs\nginx.exe -ArgumentList @('-p', '.', '-c', 'conf/nginx.conf') -PassThru
+            Start-Sleep -Milliseconds 500
+            if ($nginx.HasExited) { throw "nginx exited during startup with $($nginx.ExitCode)" }
+            @'
+          import http.client, time, zstandard
+
+          expected = b"windows static zstd smoke\n" * 256
+
+          def request(path, accept=True):
+              headers = {"Accept-Encoding": "zstd"} if accept else {}
+              for _ in range(40):
+                  try:
+                      conn = http.client.HTTPConnection("127.0.0.1", 18080, timeout=2)
+                      conn.request("GET", path, headers=headers)
+                      resp = conn.getresponse()
+                      body = resp.read()
+                      return resp.status, dict(resp.getheaders()), body
+                  except OSError:
+                      time.sleep(0.25)
+                  finally:
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+              raise SystemExit("nginx did not answer")
+
+          status, headers, body = request("/plain.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"dynamic zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("dynamic zstd response decoded to unexpected bytes")
+
+          status, headers, body = request("/static.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"static zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("static zstd response decoded to unexpected bytes")
+
+          status, _, _ = request("/missing.txt", accept=False)
+          if status != 404:
+              raise SystemExit(f"missing static file returned {status}, not 404")
+          '@ | Set-Content -Encoding ascii smoke-request.py
+            python smoke-request.py
+          } finally {
+            & .\objs\nginx.exe -s quit -p . -c conf/nginx.conf 2>$null
+            if ($nginx -and -not $nginx.WaitForExit(5000)) {
+              Stop-Process -Id $nginx.Id -Force
+            }
+          }
+
+  mingw:
+    name: MinGW-w64 x64 dynamic
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Load the pinned sources
+        # Only the six values this workflow consumes are exported; the pins
+        # file also carries OpenSSL/nasm/zstd for build-windows.sh.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . ci/tools/windows-pins.sh
+          for v in VER_NGINX SHA_NGINX VER_PCRE2 SHA_PCRE2 VER_ZLIB SHA_ZLIB; do
+            [ -n "${!v:-}" ] || { echo "::error::ci/tools/windows-pins.sh does not set $v"; exit 1; }
+          done
+          {
+            echo "NGINX_VERSION=$VER_NGINX"
+            echo "NGINX_SHA256=$SHA_NGINX"
+            echo "PCRE2_VERSION=$VER_PCRE2"
+            echo "PCRE2_SHA256=$SHA_PCRE2"
+            echo "ZLIB_VERSION=$VER_ZLIB"
+            echo "ZLIB_SHA256=$SHA_ZLIB"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pcre2
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-zstd
+
+      - name: Fetch, configure and build
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local url=$1 sha=$2 file=${1##*/}
+            curl -fsSLO --connect-timeout 30 --max-time 120 "$url"
+            printf '%s  %s\n' "$sha" "$file" | sha256sum -c -
+            tar -xzf "$file"
+          }
+          fetch "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "$NGINX_SHA256"
+          fetch "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.tar.gz" "$PCRE2_SHA256"
+          fetch "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz" "$ZLIB_SHA256"
+          module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
+          cd "nginx-$NGINX_VERSION"
+          ZSTD_INC=/mingw64/include ZSTD_LIB=/mingw64/lib \
+            ./configure \
+              --with-cc=gcc \
+              --with-pcre="../pcre2-$PCRE2_VERSION" \
+              --with-zlib="../zlib-$ZLIB_VERSION" \
+              --add-dynamic-module="$module_dir"
+          # A parallel build can start the dynamic-module link before nginx's
+          # MinGW import library exists. The generated makefile does not expose
+          # that library as a separate target, so preserve its declared order.
+          make -j1
+
+      - name: Verify dynamic modules and directives
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "nginx-$NGINX_VERSION"
+          test -f objs/ngx_http_zstd_filter_module.so
+          test -f objs/ngx_http_zstd_static_module.so
+          mkdir -p conf logs
+          cat > conf/nginx.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http { server { listen 8080; zstd on; zstd_static on; } }
+          EOF
+          ./objs/nginx.exe -t -p . -c conf/nginx.conf
+          sed -i 's/zstd on/zstd_not_a_directive on/' conf/nginx.conf
+          if ./objs/nginx.exe -t -p . -c conf/nginx.conf; then
+            echo 'bogus directive was accepted' >&2
+            exit 1
+          fi
+
+      - name: Run dynamic request smoke
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "nginx-$NGINX_VERSION"
+          pacman --noconfirm -S --needed mingw-w64-x86_64-python-zstandard
+          mkdir -p conf logs html
+          python - <<'PY'
+          import pathlib, zstandard
+
+          root = pathlib.Path("html")
+          plain = b"windows dynamic zstd smoke\n" * 256
+          root.joinpath("plain.txt").write_bytes(plain)
+          root.joinpath("static.txt").write_bytes(plain)
+          root.joinpath("static.txt.zst").write_bytes(zstandard.ZstdCompressor().compress(plain))
+          PY
+          cat > conf/nginx.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:18081;
+                  root html;
+                  zstd on;
+                  zstd_types text/plain;
+                  zstd_static on;
+              }
+          }
+          EOF
+          cat > conf/invalid.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http { server { listen 127.0.0.1:18081; zstd_not_a_directive on; } }
+          EOF
+          if ./objs/nginx.exe -t -p . -c conf/invalid.conf 2>/dev/null; then
+            echo 'bogus directive was accepted' >&2
+            exit 1
+          fi
+          ./objs/nginx.exe -t -p . -c conf/nginx.conf
+          ./objs/nginx.exe -p . -c conf/nginx.conf &
+          nginx_pid=$!
+          sleep 0.5
+          if ! kill -0 "$nginx_pid" 2>/dev/null; then
+            echo "nginx exited during startup" >&2
+            exit 1
+          fi
+          trap './objs/nginx.exe -s quit -p . -c conf/nginx.conf >/dev/null 2>&1 || true' EXIT
+          python - <<'PY'
+          import http.client, time, zstandard
+
+          expected = b"windows dynamic zstd smoke\n" * 256
+
+          def request(path, accept=True):
+              headers = {"Accept-Encoding": "zstd"} if accept else {}
+              for _ in range(40):
+                  try:
+                      conn = http.client.HTTPConnection("127.0.0.1", 18081, timeout=2)
+                      conn.request("GET", path, headers=headers)
+                      resp = conn.getresponse()
+                      body = resp.read()
+                      return resp.status, dict(resp.getheaders()), body
+                  except OSError:
+                      time.sleep(0.25)
+                  finally:
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+              raise SystemExit("nginx did not answer")
+
+          status, headers, body = request("/plain.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"dynamic zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("dynamic zstd response decoded to unexpected bytes")
+
+          status, headers, body = request("/static.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"static zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("static zstd response decoded to unexpected bytes")
+
+          status, _, _ = request("/missing.txt", accept=False)
+          if status != 404:
+              raise SystemExit(f"missing static file returned {status}, not 404")
+          PY

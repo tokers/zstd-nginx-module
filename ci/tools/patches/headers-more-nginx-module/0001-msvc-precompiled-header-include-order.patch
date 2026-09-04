@@ -1,0 +1,91 @@
+Fix MSVC compilation of headers-more-nginx-module.
+
+nginx's win32 build compiles with a precompiled header
+(-Yungx_config.h): cl discards everything in a translation unit before
+the #include <ngx_config.h> line. headers-more includes ngx_config.h
+first inside ddebug.h, so each .c file's DDEBUG define (and everything
+else preceding the include chain) was silently thrown away, breaking
+the build. Move ngx_config.h after the DDEBUG define in each .c file
+and last among the nginx includes in ddebug.h.
+
+Based on the technique from
+https://github.com/ewwink/headers-more-nginx-module-for-windows
+(which reorders the includes inside the .c files; this variant adds
+ngx_config.h before ddebug.h and drops the stray later include — a
+cleaner equivalent). headers-more-nginx-module is BSD-2-Clause.
+
+git apply ignores everything above the first "diff --git" line, so
+this prose travels with the patch.
+
+diff --git a/src/ddebug.h b/src/ddebug.h
+index 13879af..6be37a7 100644
+--- a/src/ddebug.h
++++ b/src/ddebug.h
+@@ -2,10 +2,10 @@
+ #define DDEBUG_H
+
+
+-#include <ngx_config.h>
+ #include <ngx_core.h>
+ #include <ngx_http.h>
+ #include <nginx.h>
++#include <ngx_config.h>
+
+
+ #if defined(DDEBUG) && (DDEBUG)
+diff --git a/src/ngx_http_headers_more_filter_module.c b/src/ngx_http_headers_more_filter_module.c
+index 0bb6fec..26556b7 100644
+--- a/src/ngx_http_headers_more_filter_module.c
++++ b/src/ngx_http_headers_more_filter_module.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+
+
+@@ -14,7 +15,6 @@
+ #include "ngx_http_headers_more_headers_out.h"
+ #include "ngx_http_headers_more_headers_in.h"
+ #include "ngx_http_headers_more_util.h"
+-#include <ngx_config.h>
+
+
+ /* config handlers */
+diff --git a/src/ngx_http_headers_more_headers_in.c b/src/ngx_http_headers_more_headers_in.c
+index 983be5b..27d4f4b 100644
+--- a/src/ngx_http_headers_more_headers_in.c
++++ b/src/ngx_http_headers_more_headers_in.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+
+
+diff --git a/src/ngx_http_headers_more_headers_out.c b/src/ngx_http_headers_more_headers_out.c
+index db412a2..f6511e0 100644
+--- a/src/ngx_http_headers_more_headers_out.c
++++ b/src/ngx_http_headers_more_headers_out.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+
+
+diff --git a/src/ngx_http_headers_more_util.c b/src/ngx_http_headers_more_util.c
+index e1f3636..a309e79 100644
+--- a/src/ngx_http_headers_more_util.c
++++ b/src/ngx_http_headers_more_util.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+
+

@@ -1,111 +1,120 @@
-ngx_feature_incs="#include <zstd.h>"
-ngx_feature_test="(void) ZSTD_createCCtx();"
-ngx_feature_libs=
-ngx_feature_run=yes
+# libzstd discovery (ngx_zstd_opt_I / ngx_zstd_opt_L, version advisory) runs
+# once in ../auto/zstd, sourced from the top-level config before this file.
+# Here we only declare the filter module itself; the link flags are passed
+# via ngx_module_libs only (never the build-global NGX_LD_OPT — see
+# ../auto/zstd).
 
-ngx_zstd_opt_I=
-ngx_zstd_opt_L=
+HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
 
-if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
-    ngx_feature="ZStandard static library in $ZSTD_INC and $ZSTD_LIB"
-    ngx_feature_path=$ZSTD_INC
-
-    # we try the static shared library firstly
-    ngx_zstd_opt_I="-I$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"
-    ngx_zstd_opt_L="$ZSTD_LIB/libzstd.a"
-    SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-    . auto/feature
-
-    # restore
-    CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-    if [ $ngx_found = no ]; then
-        # then try the dynamic shared library
-        ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
-        ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath, $ZSTD_LIB"
-
-        SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-        CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-        NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-        . auto/feature
-
-        # restore
-        CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-        if [ $ngx_found = no ]; then
-            cat << END
-            $0: error: ngx_http_zstd_filter_module requires the ZStandard library, please be sure that "\$ZSTD_INC" and "\$ZSTD_LIB" are set correctly.
-END
-            exit 1
-        fi
-
-    fi
-else
-    # auto-discovery
-    ngx_feature="ZStandard static library"
-    ngx_zstd_opt_I="-DZSTD_STATIC_LINKING_ONLY"
-    ngx_zstd_opt_L="-l:libzstd.a"
-
-    # still we consider the static library firstly
-    SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-    . auto/feature
-
-    # restore
-    CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-    if [ $ngx_found = no ]; then
-
-        ngx_feature="ZStandard dynamic library"
-        ngx_zstd_opt_L="-lzstd"
-        SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-        CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-        NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-        . auto/feature
-
-        if [ $ngx_found = no ]; then
-            cat << END
-            $0: error: ngx_http_zstd_filter_module requires the ZStandard library.
-END
-            exit 1
-        fi
-
-        # restore
-        CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-        cat << END
-        $0: warning: ngx_http_zstd_filter_module uses advanced ZStandard APIs (which are still considered experimental) while you are trying to link the dynamic shared library.
-END
-    fi
-
-    # TODO we need more tries for the different OS port.
-fi
-
-NGX_LD_OPT="$ngx_zstd_opt_L $NGX_LD_OPT"
-
-HTTP_ZSTD_SRCS="$ngx_addon_dir/filter/ngx_http_zstd_filter_module.c"
+# Shared inline headers included by this .c file. Declare them as build
+# dependencies so an incremental build (nginx's auto/sources / make .d
+# generation) rebuilds the object whenever a header changes; without
+# this, edits to them leave stale .o files behind.
+HTTP_ZSTD_DEPS="$ngx_addon_dir/ngx_http_zstd_common.h \
+                $ngx_addon_dir/ngx_http_zstd_cache_control.h \
+                $ngx_addon_dir/ngx_http_zstd_ratio.h \
+                $ngx_addon_dir/ngx_http_zstd_sha256.h"
 
 ngx_addon_name=ngx_http_zstd_filter_module
 ngx_module_type=HTTP_FILTER
 ngx_module_name=ngx_http_zstd_filter_module
-ngx_module_incs="$ngx_zstd_opt_I"
+ngx_module_incs="$ngx_zstd_incs"
 ngx_module_srcs=$HTTP_ZSTD_SRCS
-ngx_module_libs=$NGX_LD_OPT
+ngx_module_deps=$HTTP_ZSTD_DEPS
+ngx_module_libs="$ngx_zstd_opt_L"
+
+# The CI-only test probe comes from ci/t/harness (nginx-module-testkit). It is
+# real code only when NGX_TEST_HARNESS is defined -- ci/tools/ci-build.sh sets both
+# TEST_HARNESS=1 (seen here) and -DNGX_TEST_HARNESS (the compile define), and
+# never for a packaged build. Gate its sources on the same switch so the
+# submodule is a hard prerequisite ONLY for the harness build. The paths are
+# spelled with $_ngx_zstd_root (not $ngx_addon_dir) because ngx_addon_dir is
+# reassigned to src/ before this config is sourced (see ../config:15).
+if [ "${TEST_HARNESS:-0}" = "1" ]; then
+    ngx_module_srcs="$ngx_module_srcs \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.c \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_arm.c \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_redzone.c \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_canary.c \
+                 $_ngx_zstd_root/src/ngx_http_zstd_probe_hooks.c"
+    ngx_module_deps="$ngx_module_deps \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.h \
+                 $_ngx_zstd_root/src/ngx_http_zstd_probe_hooks.h"
+    ngx_module_incs="$ngx_module_incs $_ngx_zstd_root/ci/t/harness/src"
+fi
+
+# Optional acceleration for dcz dictionary hashing: RFC 9842 keys
+# negotiation on the SHA-256 of every registered dictionary, computed at
+# config load — so nginx -t and every reload pay it. libcrypto's EVP
+# SHA-256 (hardware-accelerated where available) is roughly an order of
+# magnitude faster than the portable fallback in
+# ../ngx_http_zstd_sha256.h, which turns seconds into a blip at
+# hundreds-of-dictionaries scale. Feature-tested, never required: with
+# no libcrypto the portable implementation is used and nothing changes.
+# The -lcrypto goes through ngx_module_libs so it stays scoped to this
+# module (never build-global NGX_LD_OPT — see ../auto/zstd).
+#
+# NGX_ZSTD_NO_LIBCRYPTO=1 in the configure environment skips the
+# detection entirely (used by CI to keep the portable path covered;
+# also the escape hatch if a build must not link libcrypto).
+if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
+    if [ "${USE_OPENSSL:-NO}" = YES ] && [ "$ngx_module_link" != DYNAMIC ]; then
+        # nginx itself links OpenSSL (--with-http_ssl_module et al), so
+        # for a static addon libcrypto is already on the final link line
+        # and its headers are in CORE_INCS. That covers
+        # --with-openssl=source trees (the Windows/MSVC default), where
+        # the library does not even exist at configure time and a link
+        # probe CANNOT succeed — and it also means the module uses the
+        # same OpenSSL nginx was built with, rather than probing
+        # whatever the system ships. Nothing to add to ngx_module_libs.
+        ngx_feature="OpenSSL EVP SHA-256 headers"
+        ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path="$CORE_INCS"
+        if [ -n "${OPENSSL:-}" ]; then
+            # Use a prepared source tree when its generated headers already
+            # exist. A clean, not-yet-built tree fails this optional probe and
+            # deliberately selects the portable SHA-256 fallback. Both install
+            # spellings are named: .openssl/ (auto/lib/openssl/make, Unix) and
+            # openssl/ (makefile.msvc's --prefix, MSVC) -- and named explicitly
+            # because configure runs addon configs (auto/modules) BEFORE
+            # auto/lib/conf appends either directory to CORE_INCS, so at probe
+            # time CORE_INCS does not carry it yet.
+            ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include $OPENSSL/openssl/include"
+        fi
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          (void) md;
+                          (void) n;
+                          (void) EVP_sha256"
+        ngx_feature_libs=
+        . auto/feature
+
+        if [ "$ngx_found" = yes ]; then
+            echo " + zstd dcz dictionary hashing uses nginx's OpenSSL"
+        else
+            echo " + zstd dcz dictionary hashing uses portable SHA-256"
+        fi
+    else
+        ngx_feature="OpenSSL EVP SHA-256 (libcrypto)"
+        ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path=
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          if (EVP_Digest(\"x\", 1, md, &n, EVP_sha256(), NULL) != 1)
+                              return 1"
+        ngx_feature_libs="-lcrypto"
+        . auto/feature
+
+        if [ $ngx_found = yes ]; then
+            ngx_module_libs="$ngx_module_libs -lcrypto"
+        fi
+    fi
+fi
+
 ngx_module_order="$ngx_module_name \
                   ngx_pagespeed \
                   ngx_http_postpone_filter_module \
@@ -128,17 +137,13 @@ ngx_module_order="$ngx_module_name \
 if [ "$ngx_module_link" != DYNAMIC ]; then
     # ngx_module_order doesn't work with static modules,
     # so we must re-order filters here.
+    . "$_ngx_zstd_root/filter/reorder-static.sh"
+    next=`ngx_http_zstd_static_next`
 
-    if [ "$HTTP_GZIP" = YES ]; then
-        next=ngx_http_gzip_filter_module
-    elif echo $HTTP_FILTER_MODULES | grep pagespeed_etag_filter >/dev/null; then
-        next=ngx_pagespeed_etag_filter
-    else
-        next=ngx_http_range_header_filter_module
-    fi
-
-    HTTP_FILTER_MODULES=`echo $HTTP_FILTER_MODULES \
-                         | sed "s/$ngx_module_name//" \
-                         | sed "s/$next/$next $ngx_module_name/"`
+    # Reorder as whitespace-delimited tokens, not raw substrings: a
+    # blanket "s/$name//" would also corrupt any module whose name
+    # contains $ngx_module_name (or $next) as a substring. Pad the list
+    # with surrounding spaces so every entry has space delimiters on
+    # both sides, then match " token " exactly.
+    ngx_http_zstd_reorder_static_filter || exit 1
 fi
-

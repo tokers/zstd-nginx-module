@@ -1,0 +1,14 @@
+---
+name: ci
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: wget -q https://nginx.org/download/nginx-1.2.3.tar.gz
+      - run: |
+          tar -xzf nginx-1.2.3.tar.gz
+          ci/tools/verify-nginx-tarball.sh nginx-1.2.3.tar.gz

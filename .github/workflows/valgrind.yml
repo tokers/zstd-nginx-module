@@ -1,0 +1,101 @@
+name: Valgrind
+
+# Targeted manual Valgrind memcheck-lite soak — 60s against a debug
+# nginx build so PR feedback stays quick. The full memcheck + helgrind soak
+# lives in ci-deep.yml (weekly cron + workflow_dispatch).
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5.1.0        -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point (step 15).
+  workflow_call: {}
+
+concurrency:
+  group: valgrind-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  memcheck-lite:
+    name: Memcheck lite (60s soak)
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # Required before resolving nginx on an ephemeral fork runner.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libpcre2-dev libzstd-dev openssl pkg-config \
+            valgrind wget zlib1g-dev zstd
+
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
+            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in ci/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Memcheck soak (60s @ 4 conc)
+        env:
+          USE_VALGRIND: "1"
+        run: |
+          bash ci/tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
+            60 4

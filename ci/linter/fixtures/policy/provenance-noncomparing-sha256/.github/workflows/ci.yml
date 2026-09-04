@@ -1,0 +1,16 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+      - run: |
+          wget -q -O tool.tgz "https://example.invalid/tool.tgz"
+      - run: |
+          sha256sum tool.tgz
+      - run: |
+          tar -xzf tool.tgz
+          ./tool/configure

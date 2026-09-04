@@ -1,0 +1,18 @@
+id: nginx-unchecked-palloc
+language: c
+severity: info
+message: >-
+  Pool allocation site — verify the result is NULL-checked before use.
+  ngx_palloc/ngx_pnalloc/ngx_pcalloc return NULL on failure; dereferencing the
+  result without `if (p == NULL) return NGX_ERROR;` (or
+  NGX_HTTP_INTERNAL_SERVER_ERROR) is a NULL-deref crash under memory pressure.
+note: >-
+  Candidate only — this flags every pool-alloc call, it does NOT prove the guard
+  is missing. The reviewer confirms whether a NULL check follows. Encoding the
+  guard structurally is unreliable (declaration-init vs assignment, return/goto
+  guards), so verification is left to the model pass.
+rule:
+  kind: call_expression
+  has:
+    field: function
+    regex: ^(ngx_palloc|ngx_pnalloc|ngx_pcalloc)$

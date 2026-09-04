@@ -1,0 +1,22 @@
+# LeakSanitizer suppressions for the ASAN+UBSAN smoke tests.
+#
+# Scope: nginx CORE allocations that are still reachable when a worker is
+# terminated by SIGTERM. nginx does not free every allocation at exit by
+# design -- the process is about to die and the pool teardown is skipped --
+# so these are exit-time noise, not leaks.
+#
+# The three below are the complete set observed on builder02 (56320 bytes in
+# 3 allocations, every run): the connection/event/read-write event arrays
+# allocated in ngx_event_process_init (src/event/ngx_event.c:755, :762, :774).
+# Every frame is pure nginx core; none of them touch this module.
+#
+# Deliberately NARROW: suppression is by allocating function, so a leak from
+# ngx_http_zstd_* -- or from any other core path -- is still reported and
+# still fails the step. Do NOT widen this to a blanket `leak:ngx_*`; that
+# would suppress the module's own allocations, which reach LSan through
+# ngx_palloc and friends, and turn the whole leak gate into a no-op.
+#
+# If a new core-exit allocation shows up, add it here with its file:line and
+# a note on why it is exit-time-reachable -- do not relax the pattern.
+
+leak:ngx_event_process_init

@@ -1,0 +1,173 @@
+name: Fuzzing
+
+# Targeted manual fuzz regression: 120s libFuzzer runs on the Accept-Encoding
+# and dcz targets, plus replay of both recorded crash corpora. The long runs
+# live in ci-deep.yml (weekly cron + workflow_dispatch).
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/upload-artifact@v6.0.0 -> b7c566a772e6b6bfb58ed0dc250532a479d7789f
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: fuzzing-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-regression:
+    name: Fuzz regression (120s)
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install clang + libFuzzer
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz targets
+        run: |
+          bash ci/fuzz/build.sh \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding" \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_dcz"
+
+      # Replay every triaged past crash FIRST -- fast (each is one input)
+      # and deterministic, so a reintroduced bug fails in seconds instead
+      # of waiting on the 120s fresh budget to happen to rediscover it.
+      # The replay guard below reports the number of matching crash-* cases
+      # explicitly and fails when a non-empty corpus contains an entry outside
+      # that naming contract. Empty corpora and README metadata are still
+      # allowed, but a renamed regression must not pass as a no-op.
+      - name: Replay recorded crash regressions
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          case_list="$(mktemp)"
+          trap 'rm -f "$case_list"' EXIT
+          find regressions -mindepth 1 -maxdepth 1 -print0 > "$case_list"
+          cases=()
+          total=0
+          while IFS= read -r -d '' case_path; do
+            total=$((total + 1))
+            case_name="${case_path##*/}"
+            if [[ "$case_name" == README.md ]]; then
+              continue
+            elif [[ "$case_name" == crash-* ]]; then
+              cases+=("$case_path")
+            else
+              echo "::error::recorded regression does not match crash-* naming contract: $case_path"
+              exit 1
+            fi
+          done < "$case_list"
+          if [ "${#cases[@]}" -eq 0 ]; then
+            echo "no crash-* regression inputs found in ci/fuzz/regressions/; inspected $total corpus entries"
+          else
+            echo "replaying ${#cases[@]} recorded crash(es); inspected $total corpus entries"
+            ./fuzz_accept_encoding "${cases[@]}"
+            echo "✓ all recorded regressions still pass"
+          fi
+
+      # Same contract as the step above, for the dcz target. Kept as its
+      # own directory because the two targets take different input
+      # languages: an Accept-Encoding byte string is not an RFC 8941
+      # byte sequence, so replaying one corpus through the other target
+      # proves nothing and would only mask a rename.
+      - name: Replay recorded dcz crash regressions
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          case_list="$(mktemp)"
+          trap 'rm -f "$case_list"' EXIT
+          find regressions_dcz -mindepth 1 -maxdepth 1 -print0 > "$case_list"
+          cases=()
+          total=0
+          while IFS= read -r -d '' case_path; do
+            total=$((total + 1))
+            case_name="${case_path##*/}"
+            if [[ "$case_name" == README.md ]]; then
+              continue
+            elif [[ "$case_name" == crash-* ]]; then
+              cases+=("$case_path")
+            else
+              echo "::error::recorded dcz regression does not match crash-* naming contract: $case_path"
+              exit 1
+            fi
+          done < "$case_list"
+          if [ "${#cases[@]}" -eq 0 ]; then
+            echo "no crash-* dcz regression inputs found in ci/fuzz/regressions_dcz/; inspected $total corpus entries"
+          else
+            echo "replaying ${#cases[@]} recorded dcz crash(es); inspected $total corpus entries"
+            ./fuzz_dcz "${cases[@]}"
+            echo "✓ all recorded dcz regressions still pass"
+          fi
+
+      - name: Run fuzzer (120s regression)
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          for size in 4095 4096 4097 65535 65536; do
+            head -c "$size" /dev/zero >"corpus/boundary-$size"
+          done
+          set +e
+          ./fuzz_accept_encoding \
+            -max_total_time=120 \
+            -max_len=65536 \
+            -dict=fuzz.dict \
+            -print_final_stats=1 \
+            -artifact_prefix=crash- \
+            corpus/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in 120s"
+
+      - name: Run dcz fuzzer (120s regression)
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          for size in 4095 4096 4097 65535 65536; do
+            head -c "$size" /dev/zero >"corpus_dcz/boundary-$size"
+          done
+          set +e
+          ./fuzz_dcz \
+            -max_total_time=120 \
+            -max_len=65536 \
+            -print_final_stats=1 \
+            -artifact_prefix=crash-dcz- \
+            corpus_dcz/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ dcz fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in 120s"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: fuzz-fast-crashes
+          path: |
+            ${{ github.workspace }}/ci/fuzz/crash-*
+            ${{ github.workspace }}/ci/fuzz/crash-dcz-*
+          retention-days: 7

@@ -1,0 +1,8 @@
+---
+name: target
+on: [pull_request_target]
+jobs:
+  evil:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo base-repo secrets against head-repo code

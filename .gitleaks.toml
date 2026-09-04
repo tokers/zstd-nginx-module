@@ -1,0 +1,21 @@
+# gitleaks configuration for nginx-zstd-module.
+#
+# Extends the upstream default ruleset rather than replacing it -- dropping
+# `useDefault` here would leave the scan with NO rules and report a clean tree
+# for any secret at all, which is worse than not running gitleaks.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths this repository does not own"
+# .build/ is the throwaway nginx source tree the CI jobs unpack to compile
+# against (gitignored, see .gitignore). `gitleaks detect --no-git` walks the
+# filesystem rather than the index, so without this it reads that vendored
+# upstream tree and reports nginx's own QUIC test constants as findings --
+# upstream nginx's code, not this module's secrets, and not fixable here.
+#
+# Scoped by PATH, not by fingerprint: the nginx version in the directory name
+# changes on every bump, so a fingerprint list would silently stop matching and
+# the noise would return. The pre-commit hook is unaffected either way -- it
+# scans the staged patch, which can never contain a gitignored file.
+paths = ['''^\.build/''']

@@ -1,0 +1,34 @@
+# nginx coding style for C modules
+# Based on nginx source conventions: 4-space indent, 80-col limit,
+# aligned struct members and macros (nginx hallmark style).
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: false
+SpaceBeforeParens: ControlStatements
+PointerAlignment: Right
+AlignConsecutiveDeclarations:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+AlignConsecutiveAssignments: false
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+SortIncludes: false
+ReflowComments: false
+BreakBeforeTernaryOperators: true
+AlwaysBreakAfterReturnType: None
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceInEmptyParentheses: false

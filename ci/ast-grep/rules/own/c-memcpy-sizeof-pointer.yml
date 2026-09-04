@@ -1,0 +1,17 @@
+id: c-memcpy-sizeof-pointer
+language: c
+severity: warning
+message: >-
+  memcpy/memmove/ngx_memcpy length is sizeof(an identifier). If that identifier
+  is a pointer, only 4/8 bytes are copied (or overread); use sizeof(*ptr) or the
+  real byte length. ast-grep cannot distinguish pointers from fixed arrays or
+  struct objects, so confirm the declaration before treating this as a defect.
+note: Advisory only because fixed-array and whole-struct copies are safe twins.
+rule:
+  any:
+    - pattern: memcpy($DST, $SRC, sizeof($PTR))
+    - pattern: ngx_memcpy($DST, $SRC, sizeof($PTR))
+    - pattern: memmove($DST, $SRC, sizeof($PTR))
+constraints:
+  PTR:
+    kind: identifier

@@ -1,0 +1,10 @@
+name: Build&Test
+on:
+  workflow_call: {}
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make

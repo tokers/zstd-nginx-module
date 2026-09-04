@@ -1,0 +1,14 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+      - run: |
+          curl -fsSLO --connect-timeout 30 "https://example.invalid/tool.tgz"
+      - run: |
+          tar -xzf tool.tgz
+          ./tool/configure

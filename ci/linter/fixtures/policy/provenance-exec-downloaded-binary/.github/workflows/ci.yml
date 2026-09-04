@@ -1,0 +1,14 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+      - run: |
+          wget -q -O tool "https://example.invalid/tool"
+      - run: |
+          chmod +x tool
+          ./tool --version

@@ -1,0 +1,46 @@
+# markdownlint config for nginx-zstd-module
+# Used by ci/linter and editor integrations.
+#
+# Philosophy: enable rules that catch real defects; disable rules that fire on
+# legitimate prose patterns. Every disabled rule carries a comment explaining
+# what it would catch versus what it fights.
+
+# MD013 — line-length: disable
+# The prose blocks are hand-wrapped documentation. Tables and log-output
+# snippets legitimately run past 80 columns without breaking readability.
+# A hard line-length gate trades 120 findings for mechanical churn.
+MD013: false
+
+# MD004 — ul-style: disable
+# The rule enforces ONE bullet style across the whole tree, but this repo has
+# two established per-file conventions and neither is wrong. Measured over the
+# tracked .md files: README.md is asterisk (79 `*` vs 2 `-`), while every other
+# file is dash (69 `-` vs 0 `*`) — CONTRIBUTING.md, SECURITY.md,
+# ci/adoption-findings.md, ci/fuzz/README.md, ci/linter/README.md.
+# Any single `style:` setting therefore reddens one group or the other and
+# forces a mechanical rewrite of a file that is already internally consistent.
+# Per-file consistency is the property worth having, and MD004 cannot express
+# it, so the rule is off rather than the files rewritten.
+MD004: false
+
+# MD060 — table-column-style: disable
+# Pipe alignment in tables is cosmetic. The default expects spaces around pipes
+# that make maintenance tedious and add no semantic value.
+MD060: false
+
+# MD028 — no-blanks-blockquote: disable
+# README.md deliberately uses blank-line-separated blockquotes as consecutive
+# callouts. This pattern aids readability in rendered HTML.
+MD028: false
+
+# MD034 — no-bare-urls: disable
+# This rule fires on EMAIL ADDRESSES (github@myguard.nl, zchao1995@gmail.com),
+# not URLs. That is a false positive class in markdownlint itself — a match
+# inside `<...@...>` pattern at any nesting level gets flagged as a bare URL
+# when it is an email reference.
+MD034: false
+
+# MD041 — first-line-h1: disable
+# README.md opens with CI status badges before the H1 heading. This pattern is
+# conventional on GitHub and aids discoverability without breaking structure.
+MD041: false

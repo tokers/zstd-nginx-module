@@ -1,0 +1,247 @@
+name: CodeQL
+
+# Reusable CodeQL workflow. CI Deep owns the weekly schedule; this file keeps a
+# manual entry point for focused reruns. Third-party actions are pinned to
+# commit SHAs; see the build-test.yml header.
+
+# nginx version is resolved at run time (see "Resolve latest mainline nginx"
+# step) rather than pinned, so this analysis tracks current mainline.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  workflow_dispatch: {}
+  # Called by ci-deep.yml.
+  workflow_call: {}
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # build the CodeQL database from the tree
+      security-events: write # upload SARIF to the Security tab; the only write needed
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # Required before resolving nginx on an ephemeral fork runner.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version from nginx.org"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        # A slow-rather-than-dead mirror can still crawl past every
+        # Acquire timeout; cap the step so a stall fails HERE, named,
+        # with the log intact, instead of eating the job cap.
+        timeout-minutes: 5
+        run: |
+          # ubuntu-latest resolves apt through azure.archive.ubuntu.com,
+          # whose outage shape is ~2 minutes of default Acquire timeout
+          # per index file before the runner's mirror list falls back
+          # (#117); the bare apt-get lines below rely on this file.
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "1";' \
+            'Acquire::http::Timeout "10";' \
+            'Acquire::https::Timeout "10";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y build-essential gnupg pkg-config libzstd-dev \
+            libpcre2-dev python3 unzip wget zlib1g-dev
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in ci/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: c-cpp
+          queries: security-extended
+          # No `paths:`/`paths-ignore:` here, deliberately. GitHub documents
+          # them as applying only to interpreted languages, or to a compiled
+          # language analyzed WITHOUT building it:
+          #
+          #   "You can use this option when you run the CodeQL actions on an
+          #    interpreted language (Python, Ruby, and JavaScript/TypeScript)
+          #    or when you analyze a compiled language without building the
+          #    code (currently supported for C/C++, C#, Java and Rust)."
+          #
+          # This job does a full traced `make` of C/C++, so both keys are
+          # silently inert -- a `paths-ignore: nginx-*/**` here was carried
+          # for months and filtered nothing (nginx-core alerts kept landing
+          # in the Security tab on every mainline bump).
+          #
+          # The documented alternative, "specify appropriate build steps",
+          # does not apply either: --add-module compiles the module objects
+          # INTO the nginx binary, so there is no module-only compile, and
+          # attempting one yields the "no source code seen during build"
+          # empty-database failure. nginx core is therefore unavoidably
+          # extracted, and scoping happens after analysis, on the SARIF --
+          # see the filter step below.
+
+      - name: Build module sources for CodeQL
+        run: |
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          # --add-module (static) compiles the zstd module objects INTO the
+          # nginx binary, so a full `make` is what the CodeQL tracer sees.
+          # `make modules` only builds --add-dynamic-module .so targets and
+          # leaves the static add-module untouched, which is why CodeQL
+          # reported "no source code seen during build". Do not redirect
+          # configure to /dev/null — a silent configure failure would also
+          # produce an empty CodeQL database.
+          ./configure \
+            --with-compat \
+            --with-debug \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Perform CodeQL analysis
+        id: analyze
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: "/language:c-cpp"
+          output: sarif-results
+          # 'failure-only' is the documented setting "for users
+          # post-processing the SARIF file before uploading it to Code
+          # Scanning": results are not published here, but debugging
+          # information still reaches Code Scanning if the run fails.
+          # Prefer it over 'never', which the action documents as
+          # complicating debugging for external users.
+          upload: failure-only
+          # `analyze` finalizes the database and then tears the cluster
+          # down ("Cleaned up database cluster directory"), so by the time
+          # a following step runs, <db>/src is already gone -- the
+          # assertion below cannot see it under the default cleanup. Keep
+          # the database on disk so the extraction scope stays checkable.
+          cleanup-level: none
+
+      - name: Drop nginx-core results from SARIF
+        env:
+          SARIF: sarif-results/cpp.sarif
+        run: |
+          set -euo pipefail
+          if [ ! -f "$SARIF" ]; then
+            echo "::error::expected CodeQL SARIF at $SARIF"
+            ls -la sarif-results || true
+            exit 1
+          fi
+          python3 ci/tools/filter-codeql-sarif.py "$SARIF"
+
+      - name: Assert database saw module sources, not just nginx core
+        env:
+          DB_LOCATIONS: ${{ steps.analyze.outputs.db-locations }}
+        run: |
+          set -euo pipefail
+          # db-locations is a JSON map {"cpp": "/abs/path"} — use the
+          # action's own reported path rather than guessing RUNNER_TEMP
+          # layout, which is an implementation detail not part of its
+          # documented contract.
+          db="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["cpp"])' "$DB_LOCATIONS")"
+          if [ -z "$db" ] || [ ! -d "$db" ]; then
+            echo "::error::could not resolve the CodeQL cpp database path from db-locations: $DB_LOCATIONS"
+            exit 1
+          fi
+          # CodeQL stores extracted sources either as a src/ tree or as
+          # src.zip, depending on version and cleanup level. Accept both:
+          # unpack the zip to a scratch dir so the same find/grep logic
+          # below works either way.
+          src="$db/src"
+          if [ ! -d "$src" ]; then
+            if [ -f "$db/src.zip" ]; then
+              src="$RUNNER_TEMP/codeql-src"
+              rm -rf "$src"
+              mkdir -p "$src"
+              unzip -qq "$db/src.zip" -d "$src"
+              echo "Unpacked src.zip for inspection"
+            else
+              echo "::error::CodeQL database has neither src/ nor src.zip under $db"
+              ls -la "$db" || true
+              exit 1
+            fi
+          fi
+          echo "Extracted source tree: $src"
+          # grep -c exits 1 when it counts zero, and under `set -e` that
+          # would abort here -- swallowing the ::error:: below, which is
+          # the entire point of the assertion. Keep the `|| true`.
+          module_hits="$(find "$src" -path '*/nginx-*' -prune -o \
+            \( -path '*/filter/*' -o -path '*/static/*' -o -name '*.c' -o -name '*.h' \) \
+            -type f -print | grep -vcE '/nginx-[0-9]' || true)"
+          module_hits="${module_hits:-0}"
+          nginx_core_only="$(find "$src" -path '*/nginx-*/src/*' -type f -print | wc -l)"
+          echo "module source files in database: $module_hits"
+          echo "nginx-core src/ files in database: $nginx_core_only"
+          if [ "$module_hits" -eq 0 ]; then
+            echo "::error::CodeQL database contains zero module source files" \
+                 "(filter/, static/, *.c, *.h) — the extracted DB regressed to" \
+                 "nginx-core-only or empty, same failure class as the original" \
+                 "'no source code seen during build' report."
+            exit 1
+          fi
+          echo "✓ database includes module sources ($module_hits files)"
+
+      # Publishing happens only AFTER the extraction-scope assertion above.
+      # The assertion is what proves the database actually contained module
+      # sources; uploading first would let a run whose extraction silently
+      # collapsed to nginx-core-only publish an empty, filtered report that
+      # Code Scanning accepts as an authoritative "no module findings".
+      - name: Upload filtered SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: sarif-results/cpp.sarif
+          category: "/language:c-cpp"
+          # Surface a rejected SARIF as a failure here rather than a
+          # silently absent update in the Security tab.
+          wait-for-processing: true

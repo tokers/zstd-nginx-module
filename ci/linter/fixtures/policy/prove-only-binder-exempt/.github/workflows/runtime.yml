@@ -1,0 +1,8 @@
+name: runtime
+on:
+  workflow_call:
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - run: prove -v ci/t/

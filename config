@@ -1,11 +1,22 @@
-# Make sure the module knows it is a submodule.
-ngx_addon_name=ngx_zstd
-. $ngx_addon_dir/filter/config
+_ngx_zstd_root=$ngx_addon_dir
 
-# Make sure the module knows it is a submodule.
-ngx_addon_name=ngx_zstd
-. $ngx_addon_dir/static/config
+# Discover libzstd once (sets ngx_zstd_opt_I / ngx_zstd_opt_L, emits the
+# version advisory). Both module configs below reuse the result instead of
+# repeating the probe. The link flags flow only through each module's
+# ngx_module_libs — never NGX_LD_OPT, which is build-global and would leak
+# a libzstd DT_NEEDED onto every other dynamic module (see auto/zstd).
+. $_ngx_zstd_root/auto/zstd
 
-# The final name for reporting.
-ngx_addon_name=ngx_zstd
+# ngx_addon_dir points at src/, not at the directory holding the config:
+# every module .c and .h lives in src/ since the ci/ adoption, while the two
+# per-module config fragments stay in filter/ and static/ so each module
+# keeps its own declaration file. The fragments resolve their sources
+# against ngx_addon_dir, so they need no ../ climb.
+ngx_addon_dir=$_ngx_zstd_root/src
+. $_ngx_zstd_root/filter/config
 
+ngx_addon_dir=$_ngx_zstd_root/src
+. $_ngx_zstd_root/static/config
+
+ngx_addon_dir=$_ngx_zstd_root
+ngx_addon_name=ngx_zstd

@@ -1,0 +1,15 @@
+id: c-unbounded-string-copy
+language: c
+severity: warning
+message: >-
+  Unbounded string copy (strcpy/strcat/sprintf/gets) — no length bound, buffer
+  overflow if source is attacker-influenced. Prefer strlcpy/strlcat/snprintf, or
+  nginx ngx_cpystrn / ngx_snprintf which return the end pointer and take a limit.
+note: Confirm the destination buffer size vs the max source length before dismissing.
+rule:
+  any:
+    - pattern: strcpy($DST, $SRC)
+    - pattern: strcat($DST, $SRC)
+    - pattern: sprintf($BUF, $$$)
+    - pattern: gets($BUF)
+    - pattern: stpcpy($DST, $SRC)

@@ -1,0 +1,17 @@
+id: nginx-raw-malloc
+language: c
+severity: info
+message: >-
+  Raw malloc/calloc/realloc/free/strdup in nginx module code. nginx manages
+  memory with pools (ngx_palloc / ngx_pnalloc / ngx_pcalloc, freed with the
+  request/connection). Raw heap alloc here is a leak risk (no pool cleanup) and
+  breaks the module's memory model. Use the request or cycle pool unless this is
+  a genuinely long-lived / cross-request allocation.
+note: >-
+  Legitimate for long-lived global state or where an explicit ngx_pool_cleanup is
+  registered. Confirm lifetime before dismissing.
+rule:
+  kind: call_expression
+  has:
+    field: function
+    regex: ^(malloc|calloc|realloc|free|strdup|strndup)$

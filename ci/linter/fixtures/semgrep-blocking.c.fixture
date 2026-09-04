@@ -1,0 +1,7 @@
+#include <string.h>
+
+void
+copy_untrusted(char *destination, const char *source)
+{
+    strcpy(destination, source);
+}

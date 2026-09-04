@@ -1,0 +1,19 @@
+prompt_version: 241a7ac6f664bf98324f085489ed41a7f67eae56bf0ff500507ec84bb9f2f4eb
+skeleton_sha:   537f28ea996e6e540cebff486a9e8fff824b6918
+adopted_date:   2026-08-22
+steps_degraded: none
+
+# step 30 was recorded degraded at adoption: valgrind.suppress was the generic
+# circulated nginx file (28 unfilled <insert_a_suppression_name_here> blocks
+# naming ngx_http_lua_* and drizzle_state_connect, symbols this module never
+# links) and could mask this module's own errors.
+#
+# CLEARED at step 41 (2026-08-22). The defect narrowed to one block --
+# Memcheck:Cond over obj:*, which muted the entire use-of-uninitialised-value
+# class in any object including ours. Measured: a program reading one
+# uninitialised int exits 99 without suppressions and 0 with that block alone.
+# Replaced with an empty file carrying the derivation rules; both memcheck and
+# helgrind accept it and the muted error is visible again.
+# Detail: memory/labs/http-zstd/issues.md, ci/adoption-findings.md section 5.
+# Still reported upstream in skeleton PR #41 -- the skeleton ships the same
+# file to every adopter.

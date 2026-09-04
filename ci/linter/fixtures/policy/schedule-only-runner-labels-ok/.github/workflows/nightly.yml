@@ -1,0 +1,15 @@
+---
+# Byte-for-byte the sibling fixture's file with the pool label spelled right.
+# Schedule-only and therefore outside the fork-trust question, but the label
+# half of the check still runs over it -- and must stay silent here.
+name: nightly
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+permissions: {}
+jobs:
+  soak:
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    steps:
+      - run: echo soak

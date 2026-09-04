@@ -1,0 +1,120 @@
+name: Lint
+
+# The same ci/linter/ scripts a developer runs locally, run again on the PR --
+# so a clone that never enabled the hook (`git config core.hooksPath .githooks`)
+# cannot land nginx-convention, shell, Perl, Python or workflow-syntax
+# regressions. Local and remote run the SAME entry point on purpose: a CI-only
+# reimplementation drifts from the hook and the two stop agreeing.
+#
+# LINT_ONLY leaves out the "c" checker: its flawfinder and semgrep passes over
+# src/ are already the job of security-scanners.yml, at the same thresholds
+# (ci/linter/lint-c.sh mirrors that workflow). Running them twice per PR buys
+# nothing but queue time. The two that workflow does NOT run are covered
+# elsewhere rather than dropped: clang-tidy is CI-only there (it needs a
+# configured nginx tree), and cppcheck is a local-hook extra.
+#
+# runs-on: ubuntu-latest, NOT the self-hosted pool. This job needs no nginx
+# build, so it costs nothing against this repo's self-hosted capacity while
+# giving the fastest feedback in the suite.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  # Triggered by ci.yml, like every other member of the suite. No
+  # push/pull_request trigger here: two entry points would run it twice per PR.
+  workflow_call: {}
+
+# NOTE on ${{ github.workflow }} in this key: for a workflow reached by
+# workflow_call it evaluates to the CALLER's name ("CI"), not "Lint" -- the
+# whole suite is a single run (verified: one run row per head sha). So that
+# term is identical across every member and distinguishes nothing; the literal
+# "lint-" prefix is what keeps this group distinct from its siblings. Keep the
+# prefix unique per member. Same applies to asan/valgrind/fuzzing/codeql/
+# security-scanners/windows-build/build-test.
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Linters
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install linters
+        # One installer for CI and for a fresh clone; a second apt list here
+        # would be the thing that goes stale.
+        run: ci/linter/install-linters.sh
+
+      - name: Verify the toolchain is complete
+        # A linter missing from PATH makes its check exit 2, which run-all.sh
+        # reports as a failure rather than skipping -- this step just surfaces
+        # WHICH one before the findings scroll past.
+        run: ci/linter/install-linters.sh --check
+
+      - name: Selftest the gate
+        # Before trusting the next step's verdict, prove the gate can still say
+        # no: a selector that matches nothing must exit 2, not report clean.
+        # The step below narrows the run with LINT_ONLY, so a silent selector
+        # is exactly the failure that would make this whole job vacuous.
+        run: ci/linter/selftest.sh
+
+      - name: Run linters
+        env:
+          # Every checker this module ships except "c" -- adding a
+          # lint-*.sh without adding its name here leaves it running
+          # locally and never in CI, which is the quieter half of a gate
+          # that is not really a gate. This module has no lint-sync-stamp.sh
+          # or lint-prompt-steps.* (those track the skeleton's own adoption
+          # prompt, not this module), so they are not listed.
+          LINT_ONLY: nginx sh python perl yaml spelling ci-runners ci-ports ci-cadence ci-topology ci-secrets ci-provenance docs-drift
+        run: ci/linter/run-all.sh
+
+      # ast-grep and gitleaks live in .pre-commit-config.yaml rather than in a
+      # ci/linter/lint-*.sh, so run-all.sh above does not reach them. Without
+      # these two steps they would be the only gates in this repo that a clone
+      # which never ran `git config core.hooksPath .githooks` can bypass --
+      # exactly the failure mode this whole job exists to close. Both are
+      # invoked the same way the hook invokes them, for the same reason
+      # local and remote share run-all.sh: a CI-only reimplementation drifts.
+      - name: ast-grep (structural sinks, gate on promoted rules)
+        # -c is load-bearing: ast-grep resolves sgconfig.yml by walking UP from
+        # the cwd, so dropping it binds to nothing here and reports green.
+        # Only the promoted rules are errors; everything else stays advisory.
+        run: |
+          # -z/-0 so a path with a space or newline cannot split into two args.
+          # xargs -r: no C files is a clean tree, not an invocation with none
+          # (ast-grep with zero paths would scan the whole repo instead).
+          git ls-files -z 'src/*.c' 'src/*.h' 'ci/*.c' 'ci/*.h' \
+            | xargs -0 -r ast-grep scan -c ci/ast-grep/sgconfig.yml \
+                --error=c-alloc-mul-overflow \
+                --error=c-memcpy-sizeof-pointer \
+                --error=c-sizeof-wrong-operand \
+                --error=c-unbounded-string-copy \
+                --error=c-format-string \
+                --error=c-shell-exec
+
+      - name: gitleaks (whole tracked tree)
+        # The hook scans the staged patch; there is no staged patch in CI, so
+        # this scans the checked-out tree instead -- `detect --no-git` is the
+        # whole-tree form, and it catches a secret that reached master through
+        # a clone with no hook installed.
+        #
+        # -c .gitleaks.toml is required, not cosmetic: --no-git walks the
+        # FILESYSTEM, so it descends into the gitignored .build/ nginx tree and
+        # reports upstream nginx's QUIC test constants. The config allowlists
+        # that path and keeps the default ruleset. Exit is 1 on a finding.
+        #
+        # Verify with a NON-EXAMPLE secret -- AWS's own AKIAIOSFODNN7EXAMPLE is
+        # allowlisted upstream and reports clean, which reads like a dead gate.
+        # See the probe recipe in .pre-commit-config.yaml above the hook.
+        run: gitleaks detect --no-git -c .gitleaks.toml --no-banner --redact -v --source .

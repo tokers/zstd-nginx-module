@@ -1,0 +1,16 @@
+---
+# Schedule-only, so nothing a fork can reach -- and until 2026-08-02 that meant
+# the runner selector was not read at all. The pool label below is misspelled
+# (`buidler02`); the shape is otherwise the approved trust split byte for byte,
+# so only the label check can tell this apart from a correct file.
+name: nightly
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+permissions: {}
+jobs:
+  soak:
+    runs-on: ${{ fromJSON('["self-hosted","builder02","lxc"]') }}
+    steps:
+      - run: echo soak

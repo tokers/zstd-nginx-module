@@ -1,0 +1,16 @@
+id: c-alloc-mul-overflow
+language: c
+severity: warning
+message: >-
+  Allocation size computed with a multiplication — malloc/ngx_palloc/ngx_pnalloc
+  of `a * b`. If either factor is attacker-influenced the product can overflow
+  size_t and under-allocate, then the following copy overflows the heap. Use a
+  checked-multiply (nginx: ngx_palloc with a size validated against a bound, or
+  reject early) or calloc's built-in overflow check.
+note: Dismiss if both factors are compile-time constants or provably bounded.
+rule:
+  any:
+    - pattern: malloc($A * $B)
+    - pattern: ngx_palloc($POOL, $A * $B)
+    - pattern: ngx_pnalloc($POOL, $A * $B)
+    - pattern: ngx_pcalloc($POOL, $A * $B)

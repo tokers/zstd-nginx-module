@@ -1,0 +1,23 @@
+id: c-ctype-signed-char
+language: c
+severity: warning
+message: >-
+  ctype function (isdigit/isalpha/isspace/toupper/…) called without an explicit
+  `(unsigned char)` cast. If the argument is a signed `char` >= 0x80 it becomes
+  a negative int, which is undefined behavior for these functions. High-bit
+  bytes in hostile input → UB / wrong classification. Cast:
+  `isdigit((unsigned char)c)`.
+note: >-
+  Candidate — fires on every ctype call; dismiss when the arg is already
+  `(unsigned char)` or a known-ASCII literal. Reviewer confirms the cast.
+rule:
+  kind: call_expression
+  all:
+    - has:
+        field: function
+        regex: "^(is(digit|alpha|alnum|space|upper|lower|punct|xdigit|\
+          cntrl|print|graph)|to(upper|lower))$"
+    - not:
+        has:
+          kind: cast_expression
+          stopBy: end

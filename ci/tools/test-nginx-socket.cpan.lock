@@ -1,0 +1,27 @@
+# Locked resolver graph for Test::Nginx::Socket@0.32.
+# Regenerate with:
+#   cpanm --showdeps Test::Nginx::Socket@0.32 2>/dev/null \
+#     | awk '/^[A-Za-z0-9_:]+(~[^[:space:]]+)?$/ {print}' | sort
+Encode
+ExtUtils::MakeMaker
+ExtUtils::MakeMaker~6.59
+Fcntl
+File::Find
+File::Path
+File::Temp
+Filter::Util::Call
+HTTP::Response
+IO::Select
+IO::Socket
+IO::Socket::INET
+IPC::Run
+LWP::UserAgent
+List::MoreUtils
+List::Util
+POSIX
+Test::Base
+Test::LongString
+Text::Diff
+Time::HiRes
+URI::Escape
+perl~5.010001

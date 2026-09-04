@@ -1,0 +1,33 @@
+# codespell ignore list -- read by ci/linter/lint-spelling.sh when present.
+#
+# EMPTY ON PURPOSE, and shipped anyway so the seam is documented rather than
+# discovered. codespell's dictionary flags plenty of real identifiers, and an
+# adopter meets that on the first run: nginx-cache-turbo-module measured 151
+# findings, 149 of them correct spellings in that tree -- its own domain
+# acronym, an abbreviation for a well-known HTTP header, a URL path segment,
+# another header name, and bytes inside a fuzz corpus input.
+#
+# Without a file to put those in, the options are a red gate on arrival or a
+# blanket suppression, and the second one retires one of the cheapest real
+# checks in the set.
+#
+# Add one word per line, lowercase, with a comment saying why it is correct
+# HERE. An entry earns its place by being WRONG for this tree, never by being
+# inconvenient -- a word that is genuinely misspelled gets fixed instead.
+#
+# Note the file is itself linted, so spell out an example rather than quoting
+# the flagged token: writing the word here is what puts it in the tree.
+#
+# Corpus files are byte-exact fuzz inputs and must never be "corrected" --
+# editing one silently changes what the fuzzer replays. lib.sh already excludes
+# ci/fuzz/corpus/, so those need no entry here.
+
+# Token-end index in the Accept-Encoding scanner, paired with the start index
+# two letters earlier in the alphabet. Both are local size_t cursors in
+# ci/fuzz/fuzz_accept_encoding.c, not an abbreviation of "the".
+te
+
+# nginx's own field name on ngx_http_request_t -- the filename extension of the
+# request URI. Spelled without the final "sion" by nginx itself since 0.1, so
+# correcting it would stop the code compiling.
+exten

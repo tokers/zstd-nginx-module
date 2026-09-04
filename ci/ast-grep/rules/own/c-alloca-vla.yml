@@ -1,0 +1,13 @@
+id: c-alloca-vla
+language: c
+severity: warning
+message: >-
+  alloca() — stack overflow / stack clash if the size is non-constant and
+  attacker-influenced, and no failure path (alloca can't report OOM). Use a heap
+  allocation (in nginx: ngx_pnalloc from the request pool) with a bounded size.
+note: Dismiss if the size is a small compile-time constant.
+rule:
+  kind: call_expression
+  has:
+    field: function
+    regex: ^alloca$

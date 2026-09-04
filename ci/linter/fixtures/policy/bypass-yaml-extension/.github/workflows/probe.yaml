@@ -1,0 +1,9 @@
+---
+name: probe
+on:
+  pull_request:
+jobs:
+  evil:
+    runs-on: [self-hosted, builder02]
+    steps:
+      - run: echo executes PR-authored code on the build host

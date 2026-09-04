@@ -1,0 +1,12 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsSL -o payload https://example.invalid/payload
+      - run: |
+          unzip payload -d tool
+          unzip -qq "$db/src.zip" -d "$src"

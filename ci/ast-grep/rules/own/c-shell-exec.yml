@@ -1,0 +1,13 @@
+id: c-shell-exec
+language: c
+severity: warning
+message: >-
+  Shell/command execution (system/popen/execl*/execvp). If any part of the
+  argument is attacker-influenced this is command injection. Prefer execve with a
+  fixed argv and no shell, and validate/allow-list inputs.
+note: Trace the command string back to input before dismissing.
+rule:
+  kind: call_expression
+  has:
+    field: function
+    regex: ^(system|popen|execl|execlp|execle|execvp|execvpe)$

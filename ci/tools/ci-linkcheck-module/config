@@ -1,0 +1,18 @@
+# CI-only stub module: an unrelated dynamic module built in the same
+# nginx configure as the zstd modules, so CI can assert that libzstd
+# does NOT leak onto its DT_NEEDED (the NGX_LD_OPT regression this
+# repo fixed: that variable is build-global, and an addon appending
+# link flags there signs up every neighbouring module). Declares no
+# libs, no directives, no handlers — its only job is to exist and be
+# linked by the same build.
+
+ngx_addon_name=ngx_http_linkcheck_module
+ngx_module_type=HTTP
+ngx_module_name=ngx_http_linkcheck_module
+ngx_module_incs=
+ngx_module_deps=
+ngx_module_srcs="$ngx_addon_dir/ngx_http_linkcheck_module.c"
+ngx_module_libs=
+ngx_module_order=
+
+. auto/module

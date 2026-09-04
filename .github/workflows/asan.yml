@@ -1,0 +1,132 @@
+name: A/UBSan
+
+# Dedicated ASan+UBSan soak — mirrors the fast build-asan job in build-test.yml
+# (same configure flags, same PGP-verified tarball) but drives it through
+# soak.sh's sustained mixed-load traffic instead of the Test::Nginx suite, the
+# same way valgrind.yml's memcheck-lite job soaks the debug build. Two
+# independent dynamic-analysis lenses on the same binary shape catch different
+# things: ASan/UBSan is fast enough to run a real request storm in CI Deep
+# and catches heap overflow / UAF outside nginx's pool blocks; Valgrind (20x
+# slower) still catches the uninitialised reads and intra-pool UAF that ASan
+# cannot see. Complementary, not redundant -- keep both.
+#
+# The asan build is a STATIC --add-module binary (the module is linked into
+# the nginx binary, there is no separate .so), so the sanitizer runtime is
+# present on every code path soak.sh exercises.
+#
+# Action pins (keep in sync with build-test.yml / valgrind.yml headers):
+# actions/checkout@v5.1.0 -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point.
+  workflow_call: {}
+
+concurrency:
+  group: asan-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  asan-soak:
+    name: ASan/UBSan soak (60s)
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # `vars.POOL` is absent in forks, so do not rely on the hosted image
+      # carrying curl before the full dependency installation below.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts — the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libpcre2-dev libzstd-dev openssl pkg-config \
+            wget zlib1g-dev zstd
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in ci/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
+      # soak.sh requires ok>0 and bad==0 per worker, where a zstd-magic
+      # response must ALSO decode cleanly (ci/tools/soak.sh's worker()):
+      # a green result proves the module actually compressed real
+      # responses under the sanitizer, not merely that nothing crashed.
+      # It sets its own ASAN_OPTIONS/UBSAN_OPTIONS with halt_on_error=1
+      # so the soak fails loudly on the first report.
+      - name: Configure & build nginx with ASAN + UBSAN (static --add-module)
+        env:
+          # Keep the portable SHA-256 fallback covered under the sanitizer --
+          # see build-test.yml's identical build-asan job for why.
+          NGX_ZSTD_NO_LIBCRYPTO: 1
+        run: |
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
+          ./configure \
+            --with-compat \
+            --with-debug \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $SAN $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$SAN $(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+          if grep -q 'NGX_HTTP_ZSTD_HAVE_LIBCRYPTO' objs/ngx_auto_config.h; then
+            echo "libcrypto leaked into the portable-fallback build"; exit 1
+          fi
+
+      - name: ASan/UBSan soak (60s @ 4 conc)
+        run: |
+          bash ci/tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 60 4

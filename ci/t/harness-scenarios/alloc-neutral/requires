@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# Gate: the tree run-scenario.sh is about to boot must be a TEST_HARNESS build.
+# This scenario reads pool/fd counters out of the probe document, and without
+# both TEST_HARNESS=1 and -DNGX_TEST_HARNESS the probe endpoint compiles out
+# entirely -- `nginx -t` would then reject the `zstd_probe;` in nginx.conf and
+# the scenario would red for a build reason rather than a module one.
+#
+# Derived the same way run-scenario.sh/lib.sh resolve the build tree, so this
+# gate can never SKIP a tree the engine would boot fine or pass one it would
+# reject -- identical reasoning to fault-arms/requires and to testkit's own
+# consumer-zstd/requires.
+set -euo pipefail
+
+FLAVOR="${2:-nginx}"
+VERSION="${3:-1.31.3}"
+BUILD="${PROBER_BUILD:-${PROBER_ROOT:-$(cd ../.. && pwd)}/.build/${FLAVOR}-${VERSION}}"
+SO="$BUILD/objs/ngx_http_zstd_filter_module.so"
+
+if [ ! -f "$SO" ]; then
+    echo "ngx_http_zstd_filter_module.so not found at $SO -- build it first"
+    exit 1
+fi
+
+# Same non-vacuity gate fault-arms carries: the env var ALONE compiles the
+# sources and still yields a probe-free .so (verified live in this repo --
+# packaged=0 symbols, TEST_HARNESS=1 alone=0, both switches=18). Gate on the
+# symbol count, not on the env var, so that trap cannot silently return.
+PROBE_SYMBOLS="$(nm "$SO" 2>/dev/null | grep -c ' ngx_test_probe_' || true)"
+if [ "$PROBE_SYMBOLS" -eq 0 ]; then
+    echo "$SO carries no ngx_test_probe_* symbols -- this is a packaged (non-harness) build; configure with TEST_HARNESS=1 CFLAGS=\"\$CFLAGS -DNGX_TEST_HARNESS\" first"
+    exit 1
+fi
+
+exit 0

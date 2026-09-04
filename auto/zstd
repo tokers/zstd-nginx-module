@@ -1,0 +1,246 @@
+# auto/zstd — shared libzstd discovery for the zstd filter and static modules.
+#
+# Sourced exactly once from the top-level addon config before either module is
+# declared, so the static/dynamic/pkg-config probe sequence lives in one place
+# instead of being duplicated (and silently drifting) between filter/config and
+# static/config. Exports:
+#   ngx_zstd_opt_I — compiler include FLAGS for <zstd.h> (feature probes
+#                    and other flag contexts only)
+#   ngx_zstd_incs  — bare include DIRECTORY for ngx_module_incs: nginx's
+#                    auto/make prefixes every whitespace token of a
+#                    module's incs with the compiler's include option, so
+#                    flags placed there come out mangled ("-I -I/path
+#                    -I -DFOO"). gcc swallows that silently (the second
+#                    token becomes a bogus directory argument) and falls
+#                    back to system headers — masking version-mismatched
+#                    builds — while MSVC fails loudly with C1083, which
+#                    is how this was found.
+#   ngx_zstd_opt_L — linker flags for libzstd
+#
+# The link flags flow ONLY through each module's ngx_module_libs (see
+# filter/config and static/config): nginx's auto/module routes those to
+# CORE_LIBS for a static (--add-module) build and to the module's own
+# link line for a dynamic (--add-dynamic-module) build. They must NOT be
+# appended to NGX_LD_OPT — that variable is global to the whole build, so
+# every OTHER dynamic module in the same nginx configure (e.g. an
+# ngx_brotli pair) would pick up a spurious DT_NEEDED on libzstd, which
+# surfaces as dependency bloat in distro packaging (this module's .so
+# requirements leaking onto unrelated module packages).
+
+ngx_feature_incs="#include <zstd.h>"
+# ZSTD_compressStream2() (and ZSTD_CCtx_reset(), used unconditionally by the
+# module) establish a hard libzstd 1.4.0 floor. Enforce it at the feature
+# probe so an older library fails configure with the not-found error below
+# rather than failing the compile deep in the module sources.
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10400
+#error libzstd 1.4.0 or newer is required
+#endif
+(void) ZSTD_compressStream2;"
+ngx_feature_libs=
+ngx_feature_run=no
+
+ngx_zstd_opt_I=
+ngx_zstd_incs=
+ngx_zstd_opt_L=
+
+if [ -n "$ZSTD_INC" ] || [ -n "$ZSTD_LIB" ]; then
+
+    if [ "$NGX_CC_NAME" = "msvc" ] && command -v cygpath > /dev/null 2>&1; then
+        # cl is a native Windows program: it reads an MSYS-style
+        # /c/users/... path as \c\users\... on the current drive and
+        # fails with C1083, and the MSYS shell does not rewrite paths
+        # that nmake passes to cl out of the generated Makefile.
+        # Normalize absolute POSIX spellings to the mixed C:/... form
+        # so ZSTD_INC/ZSTD_LIB work however the operator typed them
+        # (relative paths are left alone — both toolchains take those).
+        case "$ZSTD_INC" in
+            /*) ZSTD_INC=`cygpath -m "$ZSTD_INC"` ;;
+        esac
+        case "$ZSTD_LIB" in
+            /*) ZSTD_LIB=`cygpath -m "$ZSTD_LIB"` ;;
+        esac
+    fi
+
+    ngx_feature="ZStandard static library in $ZSTD_INC and $ZSTD_LIB"
+    ngx_feature_path=$ZSTD_INC
+
+    # The static archive's name is toolchain-specific: cmake's MSVC
+    # build of libzstd emits zstd_static.lib (with ZSTD_BUILD_SHARED
+    # =OFF), and cl/link accept it as a full path exactly like the
+    # full-path libzstd.a below — -I and -D are cl-compatible too, so
+    # this whole branch works under NGX_CC_NAME=msvc with only the
+    # name swapped. (The gcc-spelled -L/-l dynamic retry further down
+    # is not: cl drops those flags with a D9002 warning, so on msvc a
+    # missing static archive falls through to the clear error message
+    # rather than a silent half-link.)
+    if [ "$NGX_CC_NAME" = "msvc" ]; then
+        ngx_zstd_static_archive="zstd_static.lib"
+    else
+        ngx_zstd_static_archive="libzstd.a"
+    fi
+
+    # we try the static library first. The define is only a candidate here:
+    # it rides ngx_zstd_opt_I for the probe, and is committed to CFLAGS (a
+    # flag context every source file sees) ONLY once the static archive is
+    # actually confirmed below. If it were added to CFLAGS unconditionally,
+    # a subsequent dynamic-library fallback would compile against
+    # ZSTDLIB_STATIC_API declarations while linking a shared object whose
+    # ABI does not guarantee them -- see the dynamic branch's comment.
+    ngx_zstd_opt_I="-I$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"
+    ngx_zstd_incs="$ZSTD_INC"
+    ngx_zstd_opt_L="$ZSTD_LIB/$ngx_zstd_static_archive"
+    SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
+
+    . auto/feature
+
+    # restore
+    CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = yes ]; then
+        # Static archive confirmed: commit the define to CFLAGS so every
+        # source file compiles with the experimental API visible, matching
+        # what was just probed and linked.
+        CFLAGS="$CFLAGS -DZSTD_STATIC_LINKING_ONLY"
+    else
+        # then try the dynamic shared library. Do NOT carry
+        # -DZSTD_STATIC_LINKING_ONLY into this probe or into CFLAGS: the
+        # experimental (ZSTDLIB_STATIC_API) section has no stable ABI
+        # guarantee, so a module built against it but linked dynamically
+        # would import symbols (ZSTD_createCCtxParams and friends) that a
+        # future libzstd.so is free to remove or reshape. ngx_zstd_opt_I is
+        # reset to plain -I so downstream consumers (ngx_module_incs, the
+        # version-probe below) see the dynamic build's real flags.
+        ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
+        ngx_zstd_opt_I="-I$ZSTD_INC"
+        if [ "${NGX_PLATFORM:-}" = win32 ]; then
+            # MinGW produces PE/COFF modules. Its linker has no ELF runtime
+            # search path to encode, and --enable-new-dtags/-rpath are either
+            # rejected or ignored depending on the binutils version. The DLL
+            # must be beside nginx.exe or otherwise on Windows' DLL search
+            # path at runtime.
+            ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd"
+        else
+            ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
+        fi
+
+        SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+        CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+        NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
+
+        . auto/feature
+
+        # restore
+        CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+        if [ $ngx_found = no ]; then
+            cat << END
+            $0: error: the ngx_http_zstd modules require the ZStandard library, please be sure that "\$ZSTD_INC" and "\$ZSTD_LIB" are set correctly.
+END
+            exit 1
+        fi
+
+    fi
+else
+    # auto-discovery: prefer dynamic linking (static libzstd.a lacks -fPIC
+    # and cannot be linked into a shared .so dynamic module)
+    ngx_feature="ZStandard dynamic library"
+    ngx_zstd_opt_I=
+    ngx_zstd_opt_L="-lzstd"
+
+    SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
+
+    . auto/feature
+
+    # restore
+    CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ]; then
+        # Dynamic auto-discovery failed. Try pkg-config (portable across
+        # Linux, FreeBSD, OpenBSD, Gentoo, Rocky/RHEL) before giving up.
+        # Note: -l:libzstd.a is GNU ld only and not used here.
+        ngx_pkgconf=
+        if command -v pkgconf > /dev/null 2>&1; then
+            ngx_pkgconf=pkgconf
+        elif command -v pkg-config > /dev/null 2>&1; then
+            ngx_pkgconf=pkg-config
+        fi
+
+        if [ -n "$ngx_pkgconf" ] && $ngx_pkgconf --exists libzstd 2>/dev/null; then
+            ngx_feature="ZStandard library via pkg-config"
+            ngx_zstd_opt_I="$($ngx_pkgconf --cflags libzstd)"
+            # bare directories for ngx_module_incs (usually empty: a
+            # system libzstd needs no -I at all)
+            ngx_zstd_incs="$($ngx_pkgconf --cflags-only-I libzstd \
+                             | sed -e 's/-I *//g')"
+            ngx_zstd_opt_L="$($ngx_pkgconf --libs libzstd)"
+
+            SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+            CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+            SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+            NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
+
+            . auto/feature
+
+            # restore
+            CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+            NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+        fi
+
+        if [ $ngx_found = no ]; then
+            cat << END
+            $0: error: the ngx_http_zstd modules require the ZStandard library.
+            Install libzstd-dev (Debian/Ubuntu), zstd-devel (RHEL/Rocky),
+            dev-libs/zstd (Gentoo), or security/zstd (FreeBSD/OpenBSD ports),
+            or set ZSTD_INC and ZSTD_LIB to the library location.
+END
+            exit 1
+        fi
+    fi
+
+fi
+
+# Advisory: report the detected zstd version when a directive's full
+# functionality needs a newer library than the 1.4.0 floor enforced above.
+# The module always uses ZSTD_CCtx_reset() + ZSTD_compressStream2() (both
+# 1.4.0); there is no ZSTD_initCStream_usingCDict() fallback path. The only
+# version-gated directive is zstd_target_cblock_size (libzstd >= 1.5.6).
+#
+# Ask the compiler rather than trying to parse preprocessor output.  The
+# latter is compiler-specific (MSVC does not accept GCC's language-selection
+# and preprocessing flags),
+# while auto/feature already knows how to invoke the configured toolchain.
+ngx_feature="libzstd 1.5.6 or newer"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_incs="#include <zstd.h>"
+ngx_feature_path=
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10506
+#error libzstd older than 1.5.6
+#endif
+(void) ZSTD_versionNumber()"
+ngx_feature_libs="$ngx_zstd_opt_L"
+SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+. auto/feature
+CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+
+if [ "$ngx_found" = no ]; then
+        cat << END
+        Note: libzstd older than 1.5.6 detected.
+        "zstd_target_cblock_size" requires libzstd >= 1.5.6 and will have
+        no effect at runtime on this build. Every other directive is
+        fully functional. Upgrade libzstd to 1.5.6+ for that directive.
+END
+fi

@@ -1,0 +1,10 @@
+name: runtime
+on:
+  workflow_call:
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    env:
+      TEST_BASE_PORT: "18976"
+    steps:
+      - run: prove -v ci/t/

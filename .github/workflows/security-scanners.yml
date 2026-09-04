@@ -1,0 +1,140 @@
+name: Security scanners
+
+# Static/security scanners gate on PRs and run again in the weekly deep chain:
+# flawfinder, clang-tidy (cert-* / clang-analyzer-security.*), and semgrep over
+# the module sources, with reports uploaded as build artifacts.
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/upload-artifact@v6.0.0 -> b7c566a772e6b6bfb58ed0dc250532a479d7789f
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point (step 15).
+  workflow_call: {}
+
+concurrency:
+  group: security-scanners-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scanners:
+    name: Security scanners
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang-tidy curl flawfinder gnupg libzstd-dev \
+            nginx-dev pkg-config python3 python3-pip pipx wget
+          # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
+          # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
+          # user pip install with --break-system-packages if pipx is unavailable.
+          if command -v pipx >/dev/null; then
+            pipx install --quiet semgrep==1.173.0
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            pip3 install --quiet --user --break-system-packages semgrep==1.173.0
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Configure nginx src tree (clang-tidy headers)
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
+          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz.asc" -O "nginx-${ver}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in "$GITHUB_WORKSPACE"/ci/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${ver}.tar.gz.asc" "nginx-${ver}.tar.gz"
+          rm -rf "$gnupghome"
+          tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
+          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
+          echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
+      - name: flawfinder
+        # Threshold mirrors ci/linter/lint-c.sh exactly: gate at >=4 (below 4
+        # is risky-API grep noise; gating on it trains everyone to
+        # --no-verify). --error-level makes flawfinder itself exit non-zero
+        # at that level -- minlevel alone only controls what gets PRINTED,
+        # so a bare --minlevel=1 with no --error-level never fails this step
+        # regardless of what it finds. Move a threshold here, move it in
+        # lint-c.sh in the SAME commit.
+        run: |
+          set -o pipefail
+          source "$GITHUB_WORKSPACE/ci/linter/lib.sh"
+          mapfile_checked files find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
+            -type f \( -name '*.c' -o -name '*.h' \) -print
+          [ "${#files[@]}" -gt 0 ] || { echo 'no C scanner targets found' >&2; exit 1; }
+          flawfinder --minlevel=4 --error-level=4 "${files[@]}" \
+            2>&1 | tee flawfinder.log
+      - name: clang-tidy (cert-*, security.*)
+        run: |
+          set -euo pipefail
+          N="$NGINX_SRC_TREE"
+          INCLUDES="-I$N/src/core -I$N/src/event -I$N/src/event/modules -I$N/src/event/quic \
+            -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules -I$N/src/http/v2 -I/usr/include"
+          status=0
+          for f in \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c"; do
+            # shellcheck disable=SC2086,SC2046
+            clang-tidy "$f" \
+              --checks='-*,cert-*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
+              --warnings-as-errors='*' \
+              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
+              2>&1 | tee -a clang-tidy.log || status=1
+          done
+          exit "$status"
+      - name: semgrep
+        # Same target and threshold as ci/linter/lint-c.sh: src/ (the module's
+        # real source directory -- filter/ and static/ are a stale legacy
+        # layout this workflow was still pointed at), gate >=WARNING, and
+        # --jobs=1 --metrics=off (step 28: --jobs=1 is a CORRECTNESS flag on
+        # this host's shared RLIMIT_MEMLOCK, not a speed one; --metrics=off
+        # drops the semgrep.dev telemetry POST). `|| true` previously meant
+        # this step could never fail on a real finding.
+        run: |
+          set -o pipefail
+          source "$GITHUB_WORKSPACE/ci/linter/lib.sh"
+          mapfile_checked files find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
+            -type f \( -name '*.c' -o -name '*.h' \) -print
+          [ "${#files[@]}" -gt 0 ] || { echo 'no C scanner targets found' >&2; exit 1; }
+          semgrep scan --config p/c --config p/security-audit \
+            --severity=WARNING --severity=ERROR --error \
+            --jobs=1 --metrics=off \
+            "${files[@]}" 2>&1 | tee semgrep.log
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: security-reports
+          path: |
+            ${{ github.workspace }}/flawfinder.log
+            ${{ github.workspace }}/clang-tidy.log
+            ${{ github.workspace }}/semgrep.log
+          retention-days: 7

@@ -1,0 +1,8 @@
+name: CI
+on:
+  pull_request:
+jobs:
+  build-test:
+    uses: ./.github/workflows/build-test.yml
+    secrets:
+      GH_SUBMODULE_TOKEN: ${{ secrets.GH_SUBMODULE_TOKEN }}

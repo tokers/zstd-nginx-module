@@ -1,0 +1,784 @@
+name: CI Deep
+
+# Extended safety net: weekly + on-demand, never on pull_request or push.
+# CodeQL, fuzzing, full coverage, native sanitizer soak, and Valgrind belong
+# here because recent PR runs measured them at roughly 4-10 minutes each before
+# queueing. The PR gate keeps the faster assertion-bearing build, sanitizer,
+# compatibility, scanner, Windows/arm64, and testkit checks.
+#
+# A manual dispatch can run a SUBSET via the `jobs` input (default `all`);
+# the weekly cron passes no inputs and therefore always runs everything.
+# Use a subset when the full set would monopolise the shared pool for the
+# hours the fuzz and helgrind legs need.
+#
+# Four explicit self-hosted chains avoid relying on GitHub's unspecified ready
+# queue order:
+#   lanes 1-2: one long fuzz target each;
+#   lane 3: memcheck -> coverage -> CodeQL -> serialized flavor builds
+#           -> scanners -> native ASan/UBSan soak;
+#   lane 4: all testkit scenarios under Memcheck -> Helgrind.
+# This is longest-processing-time-first for the measured workloads and caps
+# peak demand at four even if the backing runner pool later grows.
+#   * memcheck AND helgrind run under ci/tools/soak.sh, which already passes
+#     --suppressions=ci/suppressions/valgrind.suppress and --error-exitcode=99
+#     for BOTH tools
+#     (see ci/tools/soak.sh) — the drift-fix baseline for every module.
+#
+# build-flavors exists because build-test.yml (the fast PR gate) only builds
+# ONE pinned nginx version (mainline) — the module's README documents Angie
+# support and tracks nginx stable too, but nothing in CI actually built angie
+# or nginx stable until this job. It is here (weekly), not in the PR gate,
+# because each leg is a from-scratch configure+compile+Test::Nginx run and
+# three of them would blow the PR gate's budget. Uses ci/tools/ci-build.sh, which
+# supports flavor+version args and sha256-verifies the tarball it downloads.
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/upload-artifact@v6.0.0 -> b7c566a772e6b6bfb58ed0dc250532a479d7789f
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+  HARNESS_NGINX_VERSION: "1.31.5"
+  # Keep in sync with build-test.yml's own copy of this pin -- see that
+  # file's env: block for the full rationale (unpinned cpanm resolves to
+  # whatever CPAN serves at run time; a warm cache can also retain a
+  # different historical release). 0.32 is what every install site in
+  # this repo already resolves to (verified against a recent successful
+  # CI log) and is also CPAN's current latest release.
+  TEST_NGINX_SOCKET_VERSION: "0.32"
+  TEST_NGINX_SOCKET_DIST: "AGENT/Test-Nginx-0.32.tar.gz"
+
+on:
+  schedule:
+    # Weekly Sunday 03:37 UTC, away from top-of-hour scheduler pressure.
+    - cron: "37 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "Per-target fuzz duration (seconds)"
+        required: false
+        default: "3600"
+      jobs:
+        # Which jobs a manual dispatch should run. The full set occupies most
+        # of the shared self-hosted pool for hours (fuzz alone is capped at
+        # 600min), so an on-demand run usually wants a subset -- e.g. after a
+        # suppression-file fix, only the memcheck soak is meaningful. The
+        # scheduled weekly run supplies no inputs, so `all` is the default and
+        # cron behaviour is unchanged.
+        description: "Jobs to run"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - memcheck+coverage
+          - build-flavors
+          - scanners
+
+# A long soak is often the ONLY evidence for a finding: fuzz is capped at
+# 600 minutes, memcheck and helgrind at 240. Keying the group on the job
+# selection (and on the run id for the scheduled run) keeps a targeted
+# dispatch -- e.g. `jobs=scanners`, a ~2 minute job, the documented common
+# case above -- from cancelling an in-flight weekly cron run on the same
+# ref and destroying hours of soak with no artifact. Two dispatches of the
+# SAME selection still coalesce, which is the only case where cancelling is
+# the intended behaviour.
+concurrency:
+  group: >-
+    ci-deep-${{ github.workflow }}-${{ github.ref
+    }}-${{ github.event_name == 'schedule'
+    && format('schedule-{0}', github.run_id)
+    || format('dispatch-{0}', inputs.jobs || 'all') }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-flavors:
+    name: Build & Test::Nginx (${{ matrix.flavor }} ${{ matrix.version }})
+    needs: codeql
+    if: >-
+      ${{
+        !cancelled()
+        && contains(fromJSON('["all","build-flavors"]'), inputs.jobs || 'all')
+      }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    env:
+      # Job-level band -- see ci/tools/max-port.sh. Each serialized matrix leg
+      # keeps its own port via matrix.port below; this declares the job's OWN
+      # territory to the port-band policy checker, which only understands one
+      # band per job. The legs'
+      # individual ports below all sit inside this band's width and are well
+      # clear of the 1984 Test::Nginx default, so a job that forgets to wire
+      # TEST_NGINX_PORT fails loudly on that default instead of silently
+      # landing inside this job's own territory.
+      TEST_BASE_PORT: 19300
+    strategy:
+      fail-fast: false
+      # This is lane 3's compatibility tail. Serializing the three cells keeps
+      # the complete deep workflow at four self-hosted jobs maximum.
+      max-parallel: 1
+      matrix:
+        include:
+          # Keep distinct ports even though max-parallel is one: manual reruns
+          # and a future topology change must not fall back to port 1984.
+          # Spaced by 10 because Test::Nginx reserves port+1..+3 for its
+          # stream servers. Kept distinct from build-test.yml's ports too,
+          # since both workflows can run at once on this runner.
+          - flavor: nginx
+            version: "1.31.2"
+            label: mainline
+            port: 19300
+          - flavor: nginx
+            version: "1.30.4"
+            label: stable
+            port: 19310
+          - flavor: angie
+            version: "1.12.1"
+            label: angie
+            port: 19320
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libpcre2-dev libzstd-dev pkg-config \
+            wget zstd libperl-dev cpanminus ccache mold
+
+      - name: Hash module build inputs
+        id: build-inputs
+        run: echo "hash=$(bash ci/tools/build-input-hash.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ccache objects
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ steps.build-inputs.outputs.hash }}
+          restore-keys: |
+            ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
+            ccache-ci-deep-${{ runner.os }}-
+
+      # Hybrid restore: this runner is self-hosted and persistent, so
+      # .build/ already survives between runs on disk (ci-build.sh's own
+      # "reuse unless NO_CACHE=1" check) -- this is the FALLBACK for when it
+      # does not (ephemeral runner, first run on a fresh box, or the runner
+      # pool changed). Exact-match only, never a restore-keys ladder: a
+      # PARTIAL build-tree hit (some objects rebuilt at a newer source
+      # revision, others stale) is worse than a clean rebuild, since a
+      # mismatched .o silently links into a binary that matches nothing.
+      - name: Cache build tree
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/${{ matrix.flavor }}-${{ matrix.version }}
+          key: build-tree-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ steps.build-inputs.outputs.hash }}
+
+      - name: Build server and dynamic modules
+        # No CCACHE_DIR override: ccache's own default (~/.ccache) already
+        # matches the "Cache ccache objects" step's path above.
+        env:
+          # Routed through env: rather than spliced into run: directly --
+          # both values come from this file's own hardcoded matrix.include
+          # (never attacker input), but env: indirection is the pattern
+          # zizmor's template-injection audit checks for regardless of
+          # provenance, and the Discord steps below use the same pattern.
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: bash ci/tools/ci-build.sh "$MATRIX_FLAVOR" "$MATRIX_VERSION"
+
+      - name: Verify built modules
+        env:
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: |
+          build=".build/$MATRIX_FLAVOR-$MATRIX_VERSION/objs"
+          test -f "$build/$MATRIX_FLAVOR"
+          test -f "$build/ngx_http_zstd_filter_module.so"
+          test -f "$build/ngx_http_zstd_static_module.so"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/$build/$MATRIX_FLAVOR" >> "$GITHUB_ENV"
+
+      - name: Cache Perl modules
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          ci/tools/install-test-nginx-socket.sh "$HOME/perl5"
+
+      - name: Verify test port band
+        # Before the first `prove` -- see ci/tools/max-port.sh. Each serialized
+        # matrix leg retains its own port inside this job's declared
+        # 19300-width-64 band, so a future parallelism change cannot introduce
+        # a collision or leave the stable/Angie legs unverified.
+        env:
+          MATRIX_PORT: ${{ matrix.port }}
+        run: ci/tools/max-port.sh "$MATRIX_PORT" 10
+
+      - name: Run ci/t/ (filter + static + conf-warn + dcz)
+        env:
+          # See build-test.yml's identical setting for why this must be 20,
+          # not the ~2s Test::Nginx::Socket default.
+          TEST_NGINX_TIMEOUT: "20"
+          # Per-leg listen port — see the matrix comment above. Test::Nginx
+          # prefers TEST_NGINX_SERVER_PORT over TEST_NGINX_PORT when both are
+          # set (see perldoc Test::Nginx::Socket), so the actual bind is the
+          # per-leg matrix.port; TEST_NGINX_PORT carries the job's declared
+          # TEST_BASE_PORT purely so the port-band policy checker (which only
+          # understands TEST_NGINX_PORT) can see this job is wired at all.
+          TEST_NGINX_SERVER_PORT: "${{ matrix.port }}"
+          TEST_NGINX_PORT: "${{ env.TEST_BASE_PORT }}"
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          cd "$GITHUB_WORKSPACE"
+          # ci/t/01-static.t asserts on fixture mtimes (Last-Modified/If-Modified-Since);
+          # pin them to a fixed timestamp, same as build-test.yml's tests job.
+          touch -d @1541504307 ci/t/suite/test ci/t/suite/test.zst
+          STRICT_SERVROOT="$HOME/.nginx-servroot-$MATRIX_FLAVOR-$MATRIX_VERSION-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export TEST_NGINX_SERVROOT="$STRICT_SERVROOT"
+          trap 'rm -rf -- "$STRICT_SERVROOT"' EXIT
+          rm -rf -- "$TEST_NGINX_SERVROOT"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          prove -v ci/t/00-filter.t ci/t/02-conf-warn.t
+          prove -v ci/t/03-dcz.t
+          # 01-static.t serves fixtures via "root ../suite", resolved against
+          # the servroot's PARENT, so the servroot must be a sibling of
+          # ci/t/suite — i.e. inside ci/t/. A /tmp servroot makes every static
+          # case 404. Same split as build-test.yml's tests job.
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          prove -v ci/t/01-static.t
+
+  fuzz:
+    name: Fuzz (${{ matrix.label }}, long)
+    if: ${{ (inputs.jobs || 'all') == 'all' }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: ${{ vars.POOL && 350 || 330 }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: Accept-Encoding
+            binary: fuzz_accept_encoding
+            corpus: corpus
+            minimized: corpus-min
+            dict_arg: -dict=fuzz.dict
+            artifact_prefix: crash-
+          - label: dcz
+            binary: fuzz_dcz
+            corpus: corpus_dcz
+            minimized: corpus-dcz-min
+            dict_arg: ""
+            artifact_prefix: crash-dcz-
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install clang and libFuzzer
+        run: |
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y clang curl python3
+
+      - name: Select fuzz duration
+        env:
+          RAW_FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$GH_EVENT_NAME" = "workflow_dispatch" ]; then
+            case "$RAW_FUZZ_SECONDS" in
+              ''|*[!0-9]*)
+                echo "::error::fuzz_seconds must be a non-negative integer"
+                exit 1
+                ;;
+            esac
+            if [ "$RAW_FUZZ_SECONDS" -gt 14400 ]; then
+              echo "::error::fuzz_seconds exceeds the 14400s budget"
+              exit 1
+            fi
+            printf 'FUZZ_SECS=%s\n' "$RAW_FUZZ_SECONDS" >> "$GITHUB_ENV"
+          else
+            printf 'FUZZ_SECS=3600\n' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build fuzz targets
+        run: >-
+          bash ci/fuzz/build.sh
+          "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding"
+          "$GITHUB_WORKSPACE/ci/fuzz/fuzz_dcz"
+
+      - name: Fuzz selected target
+        env:
+          FUZZ_BINARY: ${{ matrix.binary }}
+          FUZZ_CORPUS: ${{ matrix.corpus }}
+          FUZZ_DICT_ARG: ${{ matrix.dict_arg }}
+          FUZZ_ARTIFACT_PREFIX: ${{ matrix.artifact_prefix }}
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          extra=()
+          [ -z "$FUZZ_DICT_ARG" ] || extra+=("$FUZZ_DICT_ARG")
+          "./$FUZZ_BINARY" \
+            -max_total_time="$FUZZ_SECS" \
+            -max_len=65536 \
+            "${extra[@]}" \
+            -print_final_stats=1 \
+            -artifact_prefix="$FUZZ_ARTIFACT_PREFIX" \
+            "$FUZZ_CORPUS/"
+
+      - name: Minimize corpus
+        if: success()
+        env:
+          FUZZ_BINARY: ${{ matrix.binary }}
+          FUZZ_CORPUS: ${{ matrix.corpus }}
+          MIN_CORPUS: ${{ matrix.minimized }}
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          mkdir -p "$MIN_CORPUS"
+          "./$FUZZ_BINARY" -merge=1 "$MIN_CORPUS/" "$FUZZ_CORPUS/"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: fuzz-deep-${{ matrix.binary }}-crashes
+          path: ${{ github.workspace }}/ci/fuzz/${{ matrix.artifact_prefix }}*
+          retention-days: 7
+
+      - name: Upload minimized corpus
+        if: success()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: fuzz-deep-${{ matrix.binary }}-corpus
+          path: ${{ github.workspace }}/ci/fuzz/${{ matrix.minimized }}
+          retention-days: 7
+
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          FUZZ_LABEL: ${{ matrix.label }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / fuzz $FUZZ_LABEL FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "$payload" || true
+
+  memcheck:
+    name: Valgrind Memcheck soak
+    if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libpcre2-dev libzstd-dev openssl pkg-config \
+            python3 valgrind wget zlib1g-dev zstd
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          # PGP-verified against the vendored keys every run -- a runner-
+          # persisted tarball from a prior job is exactly as untrusted as a
+          # fresh download until re-checked (same "cache hit is not a trust
+          # boundary" rule as ci-build.sh, audit sha e289021 F3).
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$NGINX_VERSION"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+      - name: Memcheck soak (300s @ 4 conc, WITH suppressions)
+        env:
+          USE_VALGRIND: "1"
+        run: |
+          bash ci/tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 300 4
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / memcheck FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "$payload" || true
+
+  harness-memcheck:
+    name: Valgrind Memcheck (harness scenarios)
+    # Runs all six TEST_HARNESS consumer scenarios with the whole nginx under
+    # Valgrind Memcheck. This is the only oracle in the suite that can see a
+    # leak on a libzstd ERROR path:
+    #
+    #   * the ASan legs run detect_leaks=0 (the testkit forces it in
+    #     prober_heap_env, because nginx never frees its configuration pool),
+    #     so LSan reports nothing at all there;
+    #   * LSan-at-exit in general is structurally blind to a chain link leaked
+    #     into r->pool, because nginx frees the request pool on teardown;
+    #   * a happy-path soak never arms the fault/counter sites.
+    #
+    # Arming a codec fault under memcheck is what closes that gap. Kept in
+    # ci-deep (weekly) rather than the PR lane because memcheck runs the
+    # worker 20-50x slower; this matches the testkit README's own guidance
+    # that whole-server memcheck is a scheduled job, not a PR gate.
+    if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module (with harness submodule)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts — the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libnghttp2-dev libpcre2-dev libssl-dev \
+            libzstd-dev openssl pkg-config python3 valgrind wget zlib1g-dev zstd
+      - name: Build harness nginx tree
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$HARNESS_NGINX_VERSION"
+          cd "$GITHUB_WORKSPACE/nginx-$HARNESS_NGINX_VERSION"
+          # Same spelling as harness-fault-arms.yml's build step, deliberately:
+          # BOTH switches, set on the configure invocation itself. TEST_HARNESS=1
+          # alone compiles the probe sources and still yields a probe-free .so
+          # -- measured in this repo (packaged=0 probe symbols, TEST_HARNESS=1
+          # alone=0, both=18) -- and the symbol gate below is what stops that
+          # trap returning silently.
+          #
+          # ${CFLAGS:-}, never a bare $CFLAGS: this step runs under
+          # `set -euo pipefail` and CFLAGS is unset on a clean runner, which
+          # killed this job's sibling the first time the pattern shipped
+          # (red run 32908007375).
+          #
+          # -O0 -g3 because every frame here is read by memcheck; an optimised
+          # build reports inlined frames that do not map back to source lines.
+          TEST_HARNESS=1 \
+          CFLAGS="${CFLAGS:-} -DNGX_TEST_HARNESS" \
+          ./configure \
+            --with-compat --with-debug \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -g3 -O0 -fno-omit-frame-pointer $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          # Plain `make`, NOT `make modules`: valgrind runs the SERVER, so this
+          # job needs objs/nginx itself, which `make modules` does not build.
+          make -j"$(nproc)"
+      - name: "Gate: the built .so must carry probe symbols"
+        run: |
+          set -euo pipefail
+          SO="$GITHUB_WORKSPACE/nginx-$HARNESS_NGINX_VERSION/objs/ngx_http_zstd_filter_module.so"
+          COUNT=$(nm "$SO" | grep -c ' ngx_test_probe_' || true)
+          echo "ngx_test_probe_* symbols: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::built .so carries zero ngx_test_probe_* symbols" \
+              "-- the harness switches did not take effect, so no fault could" \
+              "be armed and this whole job would pass by testing nothing"
+            exit 1
+          fi
+      - name: Build harness C tools (prober, fakesrv, etc.)
+        run: bash ci/t/harness/ci/prober/build.sh
+      - name: Memcheck all module testkit scenarios
+        run: >-
+          ci/tools/run-testkit-scenarios.sh
+          --build "$GITHUB_WORKSPACE/nginx-$HARNESS_NGINX_VERSION"
+          --version "$HARNESS_NGINX_VERSION"
+          --runner "valgrind --error-exitcode=99 --leak-check=full
+          --errors-for-leak-kinds=definite --track-origins=yes
+          --suppressions=$GITHUB_WORKSPACE/ci/t/harness/ci/prober/valgrind.supp"
+          --timeout-scale 40
+          --log-dir "$GITHUB_WORKSPACE"
+
+      - name: Upload memcheck TAP logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: harness-memcheck-tap-logs
+          path: "*-tap.log"
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / harness-memcheck FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "$payload" || true
+
+  helgrind:
+    name: Valgrind Helgrind soak
+    needs: harness-memcheck
+    if: ${{ !cancelled() && (inputs.jobs || 'all') == 'all' }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          # apt profile the bare apt-get lines below rely on: loose timeouts
+          # for the shared self-hosted box; Azure mirror only on the
+          # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl gnupg libpcre2-dev libzstd-dev openssl pkg-config \
+            python3 valgrind wget zlib1g-dev zstd
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          # PGP-verified against the vendored keys every run -- a runner-
+          # persisted tarball from a prior job is exactly as untrusted as a
+          # fresh download until re-checked (same "cache hit is not a trust
+          # boundary" rule as ci-build.sh, audit sha e289021 F3).
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$NGINX_VERSION"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+      - name: Helgrind soak (300s @ 4 conc, --error-exitcode=99, WITH suppressions)
+        env:
+          USE_HELGRIND: "1"
+        run: |
+          bash ci/tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 300 4
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / helgrind FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "$payload" || true
+
+  scanners:
+    name: Security scanners
+    needs: build-flavors
+    if: >-
+      ${{
+        !cancelled()
+        && contains(fromJSON('["all","scanners"]'), inputs.jobs || 'all')
+      }}
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/security-scanners.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  # Coverage is a REPORT, never a gate (step 26) -- the cheapest way to move
+  # the number is a test that touches a line and asserts nothing, so a floor
+  # buys the metric and sells the thing it proxied for. Weekly cadence
+  # (this file, never PR-time) because ci/tools/coverage.sh does a full
+  # from-scratch coverage-instrumented build plus the whole ci/t/ suite.
+  coverage:
+    name: Coverage report (src/)
+    needs: memcheck
+    if: >-
+      ${{
+        !cancelled()
+        && contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all')
+      }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    # The coverage build compiles the probe in and runs all six harness
+    # scenarios plus runtime drivers after Test::Nginx. A job capped below its
+    # own workload can never pass, and the resulting "cancelled" reads as
+    # flakiness rather than as the cap it is.
+    timeout-minutes: 45
+    env:
+      # This job's own Test::Nginx port band -- see ci/tools/max-port.sh.
+      # Distinct from build-flavors' 19300 (width 64) and build-test.yml's
+      # 19200 so a collision needs three concurrent runners occupied, not
+      # two. coverage.sh runs `prove` internally without a caller-supplied
+      # port, so it takes Test::Nginx's compiled-in default (1984) unless
+      # TEST_NGINX_PORT steers it here.
+      TEST_BASE_PORT: 19330
+      TEST_NGINX_PORT: 19330
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          # coverage.sh runs the ci/t/harness-scenarios/* scenarios by default
+          # (COVERAGE_HARNESS=1) so the libzstd FAULT paths are counted rather
+          # than reported as dead lines -- no ci/t/ test can reach them, since
+          # libzstd cannot be made to fail from outside the process. Those
+          # scenarios need the harness submodule; without it coverage.sh warns
+          # and silently reports the smaller, pre-harness number.
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts — the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cpanminus curl gcovr gnupg libnghttp2-dev libpcre2-dev \
+            libperl-dev libssl-dev libzstd-dev openssl pkg-config \
+            python3 python3-requests strace wget zlib1g-dev zstd
+      - name: Cache Perl modules
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
+      - name: Install Test::Nginx::Socket
+        run: |
+          ci/tools/install-test-nginx-socket.sh "$HOME/perl5"
+      - name: Verify test port band
+        # Before the first `prove` inside coverage.sh -- see ci/tools/max-port.sh.
+        run: ci/tools/max-port.sh "$TEST_BASE_PORT"
+      - name: Coverage build + report
+        env:
+          # Preserve the pre-expansion line-coverage floor while the broader
+          # 86.6% baseline leaves headroom for compiler/version drift.
+          COVERAGE_FAIL_UNDER: "85"
+        run: bash ci/tools/coverage.sh nginx
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-report
+          path: .build/coverage-report/
+          retention-days: 7
+
+  codeql:
+    name: CodeQL
+    needs: coverage
+    if: ${{ !cancelled() && (inputs.jobs || 'all') == 'all' }}
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      security-events: write # upload CodeQL SARIF to code scanning
+
+  asan-soak:
+    name: A/UBSan soak
+    needs: scanners
+    if: ${{ !cancelled() && (inputs.jobs || 'all') == 'all' }}
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/asan.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read

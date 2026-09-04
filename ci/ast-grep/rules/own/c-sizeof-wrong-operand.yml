@@ -1,0 +1,18 @@
+id: c-sizeof-wrong-operand
+language: c
+severity: warning
+message: >-
+  ngx_cpymem/ngx_memcpy/memcpy length is `sizeof(x) - 1` where x is not a string
+  literal — the `-1` idiom is for dropping the NUL of a literal; on an array or
+  pointer it silently copies one byte too few (or, on a pointer, sizeof the
+  pointer). Verify the length matches the real object size.
+note: Correct for `sizeof("literal") - 1`; this fires on non-literal operands.
+rule:
+  any:
+    - pattern: ngx_cpymem($DST, $SRC, sizeof($X) - 1)
+    - pattern: ngx_memcpy($DST, $SRC, sizeof($X) - 1)
+    - pattern: memcpy($DST, $SRC, sizeof($X) - 1)
+  not:
+    has:
+      kind: string_literal
+      stopBy: end

@@ -1,0 +1,23 @@
+# perlcritic config -- used by ci/linter/lint-perl.sh and by editor plugins.
+#
+# The Perl in this repo is a Test::Nginx::Socket suite (ci/t/*.t), not library
+# code. Four default policies at severity >=4 describe a .pm and fire on every
+# well-formed .t file; leaving them on lands the gate red on arrival, which
+# only teaches everyone to --no-verify. Each exclusion below is about the file
+# SHAPE, not about tolerating a real defect:
+#
+#   RequireExplicitPackage  a .t is a script, not a module; wrapping the suite
+#                           in a package would hide Test::Nginx's exported DSL.
+#   RequireEndWithOne       same reason -- a script has no module return value.
+#   RequireUseStrict        Test::Nginx::Socket enables strict and warnings in
+#   RequireUseWarnings      its import, so the policies see "code before
+#                           strictures" for pragmas that ARE in effect.
+#
+# Everything else at severity >=4 stays live. Add a policy here only with the
+# reason it cannot apply, not because it is inconvenient.
+severity = 4
+
+[-Modules::RequireExplicitPackage]
+[-Modules::RequireEndWithOne]
+[-TestingAndDebugging::RequireUseStrict]
+[-TestingAndDebugging::RequireUseWarnings]

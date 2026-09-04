@@ -1,0 +1,11 @@
+name: Build&Test
+on:
+  workflow_call:
+    secrets:
+      GH_SUBMODULE_TOKEN:
+        description: token for the private submodule checkout
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make

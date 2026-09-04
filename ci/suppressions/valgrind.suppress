@@ -1,0 +1,45 @@
+# Valgrind suppressions for nginx-zstd-module.
+#
+# DELIBERATELY EMPTY. Read this before adding a block.
+#
+# What was here until 2026-08-22: the 28-block generic nginx suppression file
+# that circulates online. Every block still carried the unedited
+# `<insert_a_suppression_name_here>` placeholder, and the set named
+# `ngx_http_lua_*` and `drizzle_state_connect` -- symbols this module does not
+# link. It had been adopted wholesale, never derived.
+#
+# Most of it was merely inert. One block was not:
+#
+#     { <insert_a_suppression_name_here>
+#       Memcheck:Cond
+#       obj:* }
+#
+# `Memcheck:Cond` with `obj:*` matches a use-of-uninitialised-value conditional
+# in ANY object at ANY depth, including ngx_http_zstd_filter_module.so. It muted
+# that entire error class -- the class most likely to catch a real bug in this
+# module's header parsing -- across both the memcheck and helgrind lanes, since
+# ci/tools/soak.sh feeds this file to both.
+#
+# Measured, not inferred. A four-line C program reading one uninitialised int:
+#     without suppressions          valgrind exits 99, 1 uninitialised error
+#     with that block alone         valgrind exits 0,  0 errors
+# So `Memcheck lite (60s soak)` was reporting green by construction for the Cond
+# class, and would have kept doing so however long the soak ran.
+#
+# Empty is the correct default: it suppresses nothing and therefore hides
+# nothing. A soak that goes red on genuine nginx-core noise is a real result to
+# triage, not a reason to restore a file nobody derived.
+#
+# ADDING A BLOCK -- the rules, so this does not silently regrow:
+#
+#   1. Derive it, never copy it. ci/tools/soak.sh already passes
+#      --gen-suppressions=all, so a real soak prints the exact block to paste.
+#   2. Name it. A placeholder name means nobody decided what is being
+#      suppressed; that is the state this file was just rescued from.
+#   3. Anchor it to a named frame that is NOT ours -- an `ngx_*` core symbol or
+#      a libc entry point reached from one. A block whose stack could match a
+#      frame in src/ suppresses our own bug.
+#   4. Never use `obj:*`, and never let `...` be the only frame constraint.
+#      Both match arbitrary code, which is a mute rather than a suppression.
+#   5. Say WHY in a comment above the block: which run produced it, and why the
+#      finding is not this module's to fix.

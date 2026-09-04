@@ -1,0 +1,77 @@
+---
+name: CI
+
+# Single PR gate entry point. On merged master, only the testkit harness runs
+# to retain its required-check promotion signal; the already-tested build,
+# lint, scanner, and Windows jobs do not run twice. Extended CodeQL, fuzz,
+# soak, and coverage work is scheduled by ci-deep.yml.
+#
+# Four self-hosted Linux lanes are budgeted explicitly:
+#   1. Build & Test: resolve/validation, then four dependency chains inside
+#      build-test.yml (mainline, sanitizer, old-libzstd, vary -> linkage).
+#   2. Security scanners.
+#   3. Harness Fault Arms (all six nginx-module-testkit consumer scenarios).
+#   4. The second initial Build & Test job (resolve and validation run together).
+#
+# Resolve normally frees its lane in seconds and makes only mainline ready. A
+# short hosted barrier then releases the other three chains after mainline has
+# first claim on that lane; they fill lanes as validation, scanners, and
+# testkit finish. Lint, Windows, and arm64 use GitHub-hosted runners and do not
+# consume these four lanes.
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-orchestrator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    if: github.event_name != 'push'
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  build-test:
+    name: Build & Test
+    if: github.event_name != 'push'
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  security-scanners:
+    # This exact case is part of the existing status-check context.
+    name: Security scanners
+    if: github.event_name != 'push'
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/security-scanners.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  harness-fault-arms:
+    # Kept in the fast gate because it reaches module-internal fault/resource
+    # paths that Test::Nginx and ordinary sanitizers cannot observe.
+    name: Harness Fault Arms
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/harness-fault-arms.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  windows-build:
+    name: Windows build
+    if: github.event_name != 'push'
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/windows-build.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read

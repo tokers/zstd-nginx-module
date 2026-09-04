@@ -1,0 +1,293 @@
+Changes with http-zstd
+
+Unreleased
+
+    *) Bugfix: "$zstd_ratio" is now exact for the whole 64-bit range of
+       byte counts. The previous form scaled the input count before
+       dividing, so a large enough response overflowed the intermediate
+       and reported a wrong ratio -- for bytes_in near UINT64_MAX it
+       logged 0.000 where the true ratio was 0.999. The variable is now
+       produced by exact integer long division that extracts each of the
+       three fractional digits without an intermediate that can wrap,
+       and is correct for expanding streams as well as shrinking ones.
+       Log output only; no response bytes change.
+
+    *) Tests: removed the standalone dcz CDict-vs-refPrefix equivalence
+       probes. They were one-off investigation tools, not production-helper
+       regression tests, and keeping them under ci/tools made the dcz test
+       surface look stronger than it was.
+
+    *) Feature: the request benchmark now has an opt-in dcz workload with
+       canonical dictionary negotiation headers, deterministic hit/miss
+       fixtures, and a response-encoding preflight. perf_stat_recipe.py
+       drives the required 1, 4, and 16 configured-dictionary matrix and
+       attaches counters only to nginx workers and compares them per measured
+       successful request, while the
+       existing ab_bench.py default remains the plain-zstd workload.
+
+    *) Feature: "zstd_static_dict_bypass on" makes the precompressed
+       static handler stand aside when a main request carries
+       Available-Dictionary and explicitly accepts dcz, allowing the
+       filter module to negotiate the dictionary response first. The
+       opt-in applies to both "zstd_static on" and "always", inherits
+       across http/server/location configuration, and emits the complete
+       Accept-Encoding / Available-Dictionary / Sec-Fetch-Site Vary key
+       before declining. The default remains off; when a later dcz policy
+       or dictionary match fails, the skipped sidecar is not revisited and
+       the filter falls back to ordinary zstd or identity without allowing
+       a shared cache to cross that routing decision.
+
+    *) Feature: "zstd_dcz_dict_trust_hashes on" opts out of verifying a
+       supplied dictionary hash literal against the file's bytes: the
+       literal is trusted verbatim as the negotiation key and the
+       load-time SHA-256 is skipped. The verify-always default is
+       unchanged. The hashing pass is the config-load cost at scale --
+       measured at 737 dictionary lines, nginx -t drops from 5.1s to
+       0.9s (user CPU 4.3s to 0.03s; sys identical, the read happens
+       either way) -- so a content-addressed deployment whose tooling
+       derives each literal from the file it ships can reclaim that on
+       every reload, owning the stated risk that a stale or mistyped
+       literal is advertised verbatim. Lines without a literal are
+       hashed as always. The directive is order-enforced like
+       zstd_dict_strict_path: declaring it after a literal-carrying
+       zstd_dcz_dict_file is a config-load error.
+
+    *) Bugfix: on 32-bit (ILP32) builds with large-file support, the
+       pledged response length used to size the first output buffer was
+       narrowed to size_t before ZSTD_compressBound(), truncating a
+       declared length above 4 GiB modulo 2^32 -- a 4 GiB body pledged as
+       4 GiB + 389 bytes was sized for 389 bytes. The length is now
+       checked for representability, and against libzstd's own
+       width-dependent input ceiling, at full off_t width before any
+       narrowing; a length that fails either check keeps the configured
+       buffer size instead of shrinking. Lengths that are representable
+       still take the first-buffer sizing unchanged, on every width. LP64
+       builds, where off_t and size_t are the same width, were never
+       affected.
+
+    *) Bugfix: per-request byte counters for $zstd_bytes_in and
+       $zstd_bytes_out wrapped on 32-bit (ILP32) systems for responses
+       exceeding 4 GiB. Both counters are now uint64_t.
+    *) Security: "zstd_dict_strict_path on" enforced its trust policy
+       only on the final path component and ignored file ownership.
+
+       The open used O_NOFOLLOW on the whole path, which the kernel
+       applies to the leaf alone -- every intermediate component was
+       resolved normally, so "/srv/current/dict.bin" with "current" a
+       symlink was followed silently. A local writer able to repoint an
+       intermediate component therefore chose the bytes a privileged
+       reload snapshotted into every worker, despite strict mode being
+       on, and despite the release-symlink layout being the exact case
+       the directive documents itself as refusing. Strict mode now
+       resolves the path one component at a time with
+       openat(O_NOFOLLOW|O_DIRECTORY) and opens the leaf relative to the
+       verified parent descriptor, so no component is traversed through
+       a symlink. It additionally requires an absolute path with no
+       "." or ".." component, which the walk cannot otherwise verify.
+
+       Separately, the trust check tested only S_IWGRP|S_IWOTH. A
+       dictionary owned by an unprivileged account at an ordinary mode
+       0644 passed while a root master read it -- and that owner can
+       rewrite the file at will, steering what the next privileged
+       reload loads, which is precisely the less-privileged writer the
+       directive exists to exclude. Strict mode now also requires the
+       file to be owned by the effective uid of the config-parsing
+       master, or by root.
+
+       Both rules are confined to "zstd_dict_strict_path on". The
+       default ("off") is byte-for-byte unchanged, so a release-symlink
+       deployment keeps working unconfigured. On a platform without
+       POSIX.1-2008 openat() (including Windows) strict mode now fails
+       closed at config load rather than degrading silently to the
+       leaf-only guarantee.
+    *) Bugfix: the optional SHA-256 argument to "zstd_dcz_dict_file" was
+       trusted verbatim as the dcz negotiation key and never checked
+       against the dictionary it named. The load-time hashing pass was
+       skipped entirely when the argument was present, so
+       "zstd_dcz_dict_file new.dict <sha256-of-old.dict>" compressed
+       against new.dict while advertising the old dictionary's hash;
+       every client that had stored the old dictionary matched the
+       advertisement, received a frame built from a dictionary it did
+       not hold, and could not decode the body. A stale or mistyped but
+       syntactically valid literal was accepted silently, and the
+       checksum in the directive gave false confidence that the pair
+       had been validated.
+
+       The dictionary is now always hashed from the bytes actually
+       read, and that hash is always the negotiation key. A supplied
+       literal is compared against it and a mismatch aborts config load
+       with an error naming the file, the supplied hash and the
+       computed one, so "nginx -t" catches the desynchronization before
+       any client sees it. The argument keeps its syntax and its
+       meaning as a deploy-time assertion; only the unverified fast
+       path is gone. Configurations whose literal matches the file are
+       unaffected, and "$zstd_dcz_dicts_hashed" now counts every loaded
+       dictionary rather than only those without a literal.
+
+    *) Bugfix: a dcz (RFC 9842) request escaped "zstd_max_cctx_memory"
+       and contaminated a worker CCtx ring slot. A dcz response does not
+       compress at "zstd_window_log": it derives its own window from the
+       negotiated dictionary, up to the RFC's 8 MB client guarantee.
+       Two consequences, both reachable on a default configuration by
+       any client that wins dcz negotiation.
+
+       First, the ring. Each slot is keyed on the parameters that drive
+       its retained workspace, because ZSTD_sizeof_CCtx() never shrinks
+       on reset. The key used "zstd_window_log" rather than the window
+       the request would actually use, so a dcz request borrowed a slot
+       vetted for the (typically much smaller) configured window and
+       raised that slot's retained workspace permanently; every later
+       plain request matching the same key then reused a context whose
+       floor was the dcz figure. The key now carries the EFFECTIVE
+       window log, so dcz requests occupy their own slots and a slot's
+       retained size again equals the figure config load vetted for it.
+
+       Second, the budget. "zstd_max_cctx_memory" is vetted at config
+       load against "zstd_window_log" only, so the dcz window walked
+       straight through a bound the operator had asked for and config
+       load had accepted (measured, libzstd 1.5.7 at level 3: 3663393
+       bytes at the default window versus 9954849 at window log 23, a
+       2.72x escape; 6.74x at level 1). When "zstd_max_cctx_memory" is
+       set to a POSITIVE budget, the dcz window is now clamped to the
+       largest window log whose estimated CCtx memory still fits the
+       budget -- the same treatment "zstd_window_log" already got,
+       since both are memory ceilings and a dictionary must not
+       silently void one. The cap is computed once at config load, so
+       the request path only compares.
+
+       The clamp is OPT-IN and changes dcz wire bytes only for operators
+       who explicitly configured a memory bound. With neither
+       "zstd_window_log" nor "zstd_max_cctx_memory" set -- the default
+       configuration -- the dcz window is exactly what it was before.
+
+    *) Feature: "zstd_buffers number size" now bounds the aggregate
+       number x size product at config load, in four tiers. The
+       directive previously delegated entirely to nginx core's
+       ngx_conf_set_bufs_slot(), which range-checks each argument but
+       never the product, so a typo ("zstd_buffers 100000 100000;"
+       instead of "100 100k;") or a value inherited unchanged from an
+       outer block could request an overflowing, or merely enormous, or
+       even multi-exabyte per-response output-chain pool -- the last of
+       these previously passed with only a log line. An overflowing
+       product is a hard config-load error naming both operands,
+       unconditionally. A representable product above 8 MB is a warning
+       (never a failure) naming the total, marked as per-response, and
+       cross-referencing the "zstd_max_cctx_memory" advisory for the
+       other half of the per-request memory budget. A representable
+       product above 256 MB is now a hard config-load error unless the
+       new "zstd_buffers_unsafe on;" directive (http, server, location,
+       inherited) is also set, in which case it is accepted and still
+       logged as a warning rather than silenced. The check covers an
+       explicit value, one inherited from an outer block, and the
+       module's own default alike.
+
+    *) Feature: compression enabled without an explicit
+       "zstd_max_cctx_memory" now estimates the per-request compressor
+       working set at config load and warns when it exceeds 32 MB.
+       zstd_max_cctx_memory is optional and rarely set, so the estimator
+       was previously skipped for the common case: a later
+       "zstd_comp_level 22" or "zstd_long on" committed hundreds of MB
+       per concurrent response (level 22 estimates ~769 MB, zstd_long at
+       the default level ~138 MB) even though the module already knew
+       the figure at config load. The warning names the estimate, the
+       level, and the retained worker bound -- each worker keeps up to
+       four contexts, so worker RSS can reach four times the per-request
+       figure, and that again per worker process. It is advisory only
+       and never fails the configuration: a config that loads today
+       keeps loading. Set "zstd_max_cctx_memory <size>" to have a bound
+       enforced at config load instead, or "zstd_max_cctx_memory 0" to
+       acknowledge the profile and silence the warning. An explicit
+       non-zero budget keeps its existing hard-failure behaviour
+       unchanged. Requires the same -DZSTD_STATIC_LINKING_ONLY build as
+       the directive; a build without the estimator API does not warn
+       rather than implying a guarantee it cannot compute.
+
+    *) Bugfix: "nginx -t" no longer dies with SIGFPE when "zstd_long on"
+       is combined with "zstd_max_cctx_memory". The config-load budget
+       check calls ZSTD_estimateCStreamSize_usingCCtxParams(), which
+       divides by the LDM hash rate. libzstd derives its long-distance
+       matching sub-parameters lazily during compression setup, so a
+       ZSTD_CCtx_params that had only had enableLongDistanceMatching set
+       still carried a zero divisor and the whole process died on a
+       floating-point exception during configuration testing. Setting
+       zstd_window_log did not avoid it. The four LDM sub-parameters are
+       now seeded with the defaults libzstd documents, which both removes
+       the crash and makes the estimate accurate for long mode: it is
+       within 0.05% of a real streaming compressor's measured footprint,
+       so the configured budget keeps its meaning instead of being
+       skipped. Because enabling long mode raises the default window to
+       128 MB, "zstd_long on" now needs a budget of roughly that size, or
+       an explicit zstd_window_log to bring it down.
+
+    *) Security: dcz is now offered only in a secure context, as RFC 9842
+       section 8 requires. The negotiation gate checked the dictionary
+       hash, the main request, the request headers and the coding weight
+       but never consulted transport security, so a matching request over
+       plain HTTP was served as Content-Encoding: dcz. Dictionary
+       compression over cleartext gives a network attacker a length
+       oracle over content the dictionary already describes. Requests on
+       a non-TLS connection now fall back to plain zstd.
+       Deployments that terminate TLS on a proxy in front of nginx see a
+       cleartext connection here and must opt in explicitly with the new
+       zstd_dcz_assume_secure_transport directive. The module never
+       infers the client's scheme from X-Forwarded-Proto or any other
+       request header: those are client-supplied on a directly reachable
+       listener, so trusting one would let any client re-enable dcz over
+       cleartext.
+       Affects only configurations using zstd_dcz_dict_file, which is new
+       in this release, so no released version is affected.
+
+    *) Security: the dcz cross-origin gate could be bypassed by a
+       duplicate request header. Sec-Fetch-Site and Available-Dictionary
+       are not in nginx's known-header table, so nginx chains duplicate
+       occurrences rather than rejecting them, and this module evaluated
+       only the first. A request carrying "Sec-Fetch-Site: same-origin"
+       ahead of the client's real "cross-site" therefore passed the RFC
+       9842 section 8.3 same-origin partitioning check, and the response
+       was compressed against a dictionary that must not be used
+       cross-site. Both headers are now counted and dcz falls back to
+       plain zstd when either appears more than once.
+       Affects only configurations using zstd_dcz_dict_file, which is
+       new in this release and not present in 0.90.8 or earlier, so no
+       released version is vulnerable. Reaching it also requires an
+       intermediary that merges or forwards a client-supplied duplicate
+       header, or a request-smuggling desync; a browser cannot trigger
+       it alone. Found during this release's audit, not reported
+       externally, so no CVE is assigned.
+
+    *) Change: the repository adopted the myguard nginx-module skeleton
+       standard. CI material moved under ci/ (t/, tests/unit/, tools/,
+       fuzz/, linter/), the module sources moved to src/, and .github/
+       workflows/ci.yml became the single pull-request entry point that
+       calls Lint, Build&Test, Security Scanners, Fuzzing, Valgrind,
+       CodeQL, A/UBSan and Windows build as reusable workflows. Long
+       runners moved to the scheduled ci-deep.yml lane. Adds a unit-test
+       layer over the real Accept-Encoding decision function, a fuzz
+       dictionary derived from live call sites with a drift gate, a
+       coverage report scoped to src/, and a tracked pre-commit hook.
+       No module behaviour changed; directives, defaults and the module
+       binary are unaffected.
+
+    *) Feature: RFC 9842 dcz dictionary compression. New repeatable
+       zstd_dcz_dict_file directive (http/server/location) loads
+       dictionaries hashed at config load; a request whose
+       Available-Dictionary matches and whose Accept-Encoding lists dcz
+       explicitly gets the response compressed against that dictionary
+       (ZSTD_CCtx_refPrefix, window capped at the RFC's 8 MB client
+       guarantee) as Content-Encoding: dcz with the 40-byte dcz frame
+       header. Both response variants emit Vary: Available-Dictionary;
+       cross-site requests (Sec-Fetch-Site) fall back to plain zstd.
+       Covered by t/03-dcz.t, tools/test_dcz.py (also under ASAN and in
+       coverage), and new dcz fuzz corpus entries.
+
+    *) Added CI matrix building nginx mainline, nginx stable, and angie
+       (monthly, in ci-deep.yml's build-flavors job), running the Perl
+       Test::Nginx suite against each.
+
+    *) Extended tools/ci-build.sh to accept a flavor argument (nginx|angie)
+       and persist the built server + both dynamic modules under .build/,
+       instead of only building pinned nginx mainline into a /tmp dir that
+       got deleted on exit.
+
+    *) Added tools/bump-versions.sh + weekly bump.yml workflow to keep the
+       nginx-stable/angie pins current.

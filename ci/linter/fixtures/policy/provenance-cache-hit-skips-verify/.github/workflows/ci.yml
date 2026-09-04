@@ -1,0 +1,21 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+      - name: Cache tool tarball
+        id: tool-tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: tool.tgz
+          key: tool-src
+      - name: Download tool
+        if: steps.tool-tarball.outputs.cache-hit != 'true'
+        run: wget -q -O tool.tgz "https://example.invalid/tool.tgz"
+      - run: |
+          tar -xzf tool.tgz
+          ./tool/configure

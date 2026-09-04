@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<!--
+  SPDX-License-Identifier: BSD-2-Clause
+  Copyright (c) 2024 the zstd-nginx-module contributors.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>zstd-nginx-module test fixture</title>
+<style>
+body { font-family: sans-serif; max-width: 800px; margin: 2em auto; line-height: 1.6; }
+h1, h2 { border-bottom: 1px solid #ccc; padding-bottom: 0.3em; }
+pre { background: #f4f4f4; padding: 1em; overflow-x: auto; }
+code { font-family: monospace; }
+</style>
+</head>
+<body>
+<h1>zstd-nginx-module Test Fixture</h1>
+<p>This file is used as a test fixture for the zstd-nginx-module test suite.
+It is original content, authored for this purpose, and licensed under the
+BSD 2-Clause License. It exists solely to provide a realistic-sized HTML
+document for compression tests.</p>
+
+<h2>About zstd Compression</h2>
+<p>Zstandard (zstd) is a fast lossless compression algorithm developed at
+Meta. It targets real-time compression scenarios at zlib-level and better
+compression ratios. It also offers a special mode for small data, called
+<em>dictionary compression</em>, that can be used to dramatically improve
+the compression ratio on small data (less than 1 KB).</p>
+
+<p>Key properties of zstd:</p>
+<ul>
+<li>Compression ratio comparable to zlib at much higher speed.</li>
+<li>Decompression speed exceeding 1 GB/s on modern hardware.</li>
+<li>Adjustable compression levels from 1 (fastest) to 22 (best ratio).</li>
+<li>Negative compression levels for ultra-fast, lower-ratio use cases.</li>
+<li>Dictionary training for small, repetitive payloads.</li>
+<li>Frame format with content-size and checksum fields.</li>
+</ul>
+
+<h2>About This Module</h2>
+<p>The <code>ngx_http_zstd_filter_module</code> compresses HTTP responses
+on the fly using zstd. It integrates into the nginx filter chain and is
+activated when a client sends <code>Accept-Encoding: zstd</code>.</p>
+
+<p>The <code>ngx_http_zstd_static_module</code> serves pre-compressed
+<code>.zst</code> files in place of originals when they exist on disk,
+without spending CPU on compression at request time.</p>
+
+<h2>Configuration Example</h2>
+<pre><code>http {
+    zstd             on;
+    zstd_comp_level  3;
+    zstd_min_length  1000;
+    zstd_types       text/plain text/css application/json
+                     application/javascript text/xml;
+    gzip_vary        on;
+
+    server {
+        listen 80;
+
+        location /static/ {
+            zstd_static on;
+            root /var/www;
+        }
+    }
+}
+</code></pre>
+
+<h2>Directives</h2>
+
+<h3>zstd</h3>
+<p><strong>Syntax:</strong> <code>zstd on | off;</code><br>
+<strong>Default:</strong> <code>zstd off;</code><br>
+<strong>Context:</strong> http, server, location, if in location</p>
+<p>Enables or disables on-the-fly zstd compression of responses.</p>
+
+<h3>zstd_comp_level</h3>
+<p><strong>Syntax:</strong> <code>zstd_comp_level level;</code><br>
+<strong>Default:</strong> <code>zstd_comp_level 3;</code><br>
+<strong>Context:</strong> http, server, location</p>
+<p>Sets the compression level. Range: ZSTD_minCLevel() to ZSTD_maxCLevel().
+Level 0 means the library default. Negative levels trade ratio for speed.</p>
+
+<h3>zstd_min_length</h3>
+<p><strong>Syntax:</strong> <code>zstd_min_length length;</code><br>
+<strong>Default:</strong> <code>zstd_min_length 20;</code><br>
+<strong>Context:</strong> http, server, location</p>
+<p>Minimum response size for compression to apply. Responses smaller than
+this value are passed through unmodified.</p>
+
+<h3>zstd_max_length</h3>
+<p><strong>Syntax:</strong> <code>zstd_max_length length;</code><br>
+<strong>Default:</strong> (no limit)<br>
+<strong>Context:</strong> http, server, location</p>
+<p>Maximum response size to compress. Larger responses bypass compression.
+Note: not enforced for chunked or streaming responses without Content-Length.</p>
+
+<h3>zstd_buffers</h3>
+<p><strong>Syntax:</strong> <code>zstd_buffers number size;</code><br>
+<strong>Default:</strong> <code>zstd_buffers 32 4k;</code> or <code>16 8k;</code><br>
+<strong>Context:</strong> http, server, location</p>
+<p>Number and size of output buffers used during compression. Total buffer
+space is number * size, defaulting to 128 KB regardless of page size.</p>
+
+<h3>zstd_types</h3>
+<p><strong>Syntax:</strong> <code>zstd_types mime-type ...;</code><br>
+<strong>Default:</strong> <code>zstd_types text/html;</code><br>
+<strong>Context:</strong> http, server, location</p>
+<p>MIME types eligible for compression in addition to text/html. Use
+<code>*</code> to match all types. Binary formats (JPEG, PNG, MP4) should
+be excluded as they are already compressed.</p>
+
+<h3>zstd_dict_file</h3>
+<p><strong>Syntax:</strong> <code>zstd_dict_file /path/to/dict;</code><br>
+<strong>Default:</strong> (none)<br>
+<strong>Context:</strong> http</p>
+<p>Path to a pre-trained zstd dictionary. Dictionaries can significantly
+improve compression of small, structurally similar responses. Both server
+and client must use the same dictionary.</p>
+
+<h3>zstd_static</h3>
+<p><strong>Syntax:</strong> <code>zstd_static on | off | always;</code><br>
+<strong>Default:</strong> <code>zstd_static off;</code><br>
+<strong>Context:</strong> http, server, location</p>
+<p>Controls serving of pre-compressed <code>.zst</code> files:</p>
+<ul>
+<li><strong>off</strong>: disabled, always serve original.</li>
+<li><strong>on</strong>: serve .zst if client supports zstd and file exists.</li>
+<li><strong>always</strong>: serve .zst unconditionally if it exists.</li>
+</ul>
+
+<h2>Variables</h2>
+
+<h3>$zstd_ratio</h3>
+<p>The compression ratio for the current response (original / compressed).
+For example <code>3.42</code> means the output is about 29% of the input.
+Only set after the filter module has compressed a response.</p>
+<pre><code>log_format main '$remote_addr - $request - ratio: $zstd_ratio';
+</code></pre>
+
+<h2>Building</h2>
+<pre><code>./configure --add-dynamic-module=/path/to/zstd-nginx-module
+make &amp;&amp; make install
+</code></pre>
+<p>Or point at the subdirectories for separate modules:</p>
+<pre><code>./configure \
+  --add-dynamic-module=/path/to/zstd-nginx-module/filter \
+  --add-dynamic-module=/path/to/zstd-nginx-module/static
+</code></pre>
+<p>Load in nginx.conf:</p>
+<pre><code>load_module modules/ngx_http_zstd_filter_module.so;
+load_module modules/ngx_http_zstd_static_module.so;
+</code></pre>
+
+<h2>Pre-compressing Static Files</h2>
+<pre><code>find /var/www/static -name "*.js" -o -name "*.css" | \
+    xargs -I{} zstd -3 -k {}
+</code></pre>
+<p>This creates <code>file.js.zst</code> alongside <code>file.js</code>.
+nginx will serve the <code>.zst</code> variant to clients that support
+zstd when <code>zstd_static on;</code> is configured.</p>
+
+<h2>Notes on gzip_vary</h2>
+<p>Always enable <code>gzip_vary on;</code> alongside this module. When
+compression is applied the module sets <code>r-&gt;gzip_vary = 1</code>,
+which causes nginx to emit <code>Vary: Accept-Encoding</code> — but only
+when <code>gzip_vary</code> is enabled. Without it, proxies and CDNs may
+cache the compressed response and serve it to clients that cannot decode
+zstd, resulting in broken responses.</p>
+
+<h2>ETag Behaviour</h2>
+<p>When a response is compressed, nginx automatically weakens the ETag
+value (<code>"abc"</code> becomes <code>W/"abc"</code>). This is correct
+per HTTP semantics — a compressed variant is a different representation —
+but means strong ETag validation will not match across compressed and
+uncompressed responses.</p>
+
+<h2>Padding</h2>
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- padding: zstd-nginx-module test fixture filler content -->
+<!-- xxxxxxxxxxxxxxxxxxxxxxxx -->
+</body>
+</html

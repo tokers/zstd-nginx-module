@@ -1,0 +1,34 @@
+---
+name: ci
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+  # Two shapes the ordering check must NOT flag, kept in the positive control so
+  # a false positive shows up as a broken control rather than as a mystery red.
+  same-step:
+    runs-on: ubuntu-latest
+    env:
+      TEST_BASE_PORT: '19600'
+      # Test::Nginx reads this, not TEST_BASE_PORT, so a prove job that declares
+      # a band without wiring it here binds 1984 regardless -- see the
+      # prove-band-not-passed-through fixture for that red.
+      TEST_NGINX_PORT: '19600'
+    steps:
+      # One run block that verifies and then binds. Step indices cannot separate
+      # these, so the check falls back to position within the text.
+      - run: |
+          bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+          prove -v ci/t/
+  word-boundary:
+    runs-on: ubuntu-latest
+    env:
+      TEST_BASE_PORT: '19700'
+    steps:
+      # "improve" is not "prove". A substring match would read this as a binder
+      # sitting above the verifier and report a finding.
+      - run: echo improve the fixture
+      - run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"

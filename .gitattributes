@@ -1,1 +1,46 @@
 *.t linguist-language=Text
+
+# Files that are executed or sourced by POSIX sh/perl on Linux (including
+# WSL builds from a Windows checkout) must stay LF: nginx's ./configure
+# sources `config`/`auto/zstd` with sh, which treats a CR as part of the
+# line and fails with "$'\r': command not found" when core.autocrlf=true
+# has smudged the checkout to CRLF.
+config text eol=lf
+auto/* text eol=lf
+*/config text eol=lf
+*.sh text eol=lf
+*.t text eol=lf
+
+# Byte-exact fixtures: fuzz corpus entries are raw Accept-Encoding header
+# bytes and .zst files are compressed frames — any EOL conversion corrupts
+# them.
+ci/fuzz/corpus/* -text
+ci/fuzz/fuzz.dict -text
+*.dict -text
+*.zst binary
+
+# t/suite/test's byte length is asserted verbatim by the static suite
+# (Content-Length and the size half of the ETag) — CRLF smudging changes
+# the on-disk size and fails every identity-response assertion.
+ci/t/suite/* -text
+
+# More byte-exact fuzz fixtures: corpus_dcz/* are raw dcz-dict header
+# bytes, and regressions{,_dcz}/* are saved crash-reproducer inputs —
+# core.autocrlf=true would smudge either and corrupt the fuzzer's inputs
+# or make a saved crash stop reproducing. Each regressions dir also has a
+# real README.md, which must stay text; order it after the wildcard so
+# the more specific rule wins.
+ci/fuzz/corpus_dcz/* -text
+ci/fuzz/regressions/* -text
+ci/fuzz/regressions/README.md text
+ci/fuzz/regressions_dcz/* -text
+ci/fuzz/regressions_dcz/README.md text
+
+# CI-only stub module (linkage-isolation job); keep it out of release
+# tarballs (git archive). Its former sibling, the vary-suppression
+# stub, no longer exists in the tree.
+/ci/tools/ci-linkcheck-module export-ignore
+
+# Patches are applied with git apply against LF checkouts; CRLF
+# smudging would make every context line mismatch.
+ci/tools/patches/** text eol=lf

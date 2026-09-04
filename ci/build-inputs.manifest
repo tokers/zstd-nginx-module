@@ -1,0 +1,12 @@
+# Paths are relative to the repository root. Directories include every regular
+# file below them. Keep this as the single source of truth for persistent build
+# trees and ccache keys.
+ci/build-inputs.manifest
+ci/tools/build-input-hash.sh
+ci/tools/ci-build.sh
+config
+auto/zstd
+filter/config
+filter/reorder-static.sh
+static/config
+src
